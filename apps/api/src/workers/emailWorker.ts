@@ -61,24 +61,41 @@ export class EmailWorkerService {
       return;
     }
 
-    // 3. Mark as PROCESSING & log WORKER_PICKED event
-    await prisma.$transaction([
-      prisma.email.update({
-        where: { id: emailId },
+    // Claim the email atomically so concurrent executions cannot both send it.
+    const claimed = await prisma.$transaction(async (tx) => {
+      const result = await tx.email.updateMany({
+        where: {
+          id: emailId,
+          status: {
+            in: [EmailStatus.SCHEDULED, EmailStatus.QUEUED, EmailStatus.RATE_LIMITED, EmailStatus.RESCHEDULED],
+          },
+        },
         data: {
           status: EmailStatus.PROCESSING,
           attempts: { increment: 1 },
         },
-      }),
-      prisma.emailEvent.create({
+      });
+
+      if (result.count !== 1) {
+        return false;
+      }
+
+      await tx.emailEvent.create({
         data: {
           emailId,
           type: EventType.WORKER_PICKED,
           message: `Worker picked job for dispatch (Attempt ${email.attempts + 1})`,
           metadata: { jobId: job.id, workerConcurrency: config.workerConcurrency },
         },
-      }),
-    ]);
+      });
+
+      return true;
+    });
+
+    if (!claimed) {
+      console.log(`[EmailWorker] Email ${emailId} is already claimed or no longer eligible. Skipping.`);
+      return;
+    }
 
     // 4. ATOMIC RATE LIMIT CHECK (Redis Lua check-and-increment)
     const hourlyLimit = email.sender.hourlyLimit || config.defaultMaxEmailsPerHour;
