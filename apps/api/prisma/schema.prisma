@@ -1,0 +1,155 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum EmailStatus {
+  SCHEDULED
+  QUEUED
+  PROCESSING
+  RATE_LIMITED
+  RESCHEDULED
+  SENT
+  FAILED
+}
+
+enum EventType {
+  CAMPAIGN_CREATED
+  JOB_ENQUEUED
+  WORKER_PICKED
+  RATE_LIMIT_CHECKED
+  RATE_LIMIT_EXCEEDED
+  RESCHEDULED_NEXT_WINDOW
+  PROVIDER_DELAY_APPLIED
+  SMTP_DELIVERED
+  INDEXED_SEARCH
+  FAILED_ATTEMPT
+  DLQ_MOVED
+}
+
+model User {
+  id              String           @id @default(uuid())
+  googleId        String?          @unique
+  email           String           @unique
+  name            String
+  avatar          String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  senders         Sender[]
+  campaigns       Campaign[]
+  emails          Email[]
+  slackConnection SlackConnection?
+
+  @@map("users")
+}
+
+model Sender {
+  id            String           @id @default(uuid())
+  userId        String
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email         String
+  name          String
+  etherealUser  String
+  etherealPass  String
+  hourlyLimit   Int              @default(100)
+  createdAt     DateTime         @default(now())
+  emails        Email[]
+  campaigns     CampaignSender[]
+
+  @@unique([userId, email])
+  @@map("senders")
+}
+
+model Campaign {
+  id          String           @id @default(uuid())
+  userId      String
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  subject     String
+  body        String
+  startTime   DateTime
+  delayMs     Int              @default(2000)
+  hourlyLimit Int              @default(100)
+  totalEmails Int              @default(0)
+  sentEmails  Int              @default(0)
+  status      String           @default("ACTIVE")
+  createdAt   DateTime         @default(now())
+  emails      Email[]
+  senders     CampaignSender[]
+
+  @@map("campaigns")
+}
+
+model CampaignSender {
+  id         String   @id @default(uuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  senderId   String
+  sender     Sender   @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([campaignId, senderId])
+  @@map("campaign_senders")
+}
+
+model Email {
+  id          String       @id @default(uuid())
+  campaignId  String
+  campaign    Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  senderId    String
+  sender      Sender       @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  recipient   String
+  subject     String
+  body        String
+  status      EmailStatus  @default(SCHEDULED)
+  scheduledAt DateTime
+  sentAt      DateTime?
+  jobId       String       @unique
+  attempts    Int          @default(0)
+  messageId   String?
+  previewUrl  String?
+  error       String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  events      EmailEvent[]
+
+  @@index([userId, status])
+  @@index([senderId, scheduledAt])
+  @@index([scheduledAt])
+  @@map("emails")
+}
+
+model EmailEvent {
+  id        String      @id @default(uuid())
+  emailId   String
+  email     Email       @relation(fields: [emailId], references: [id], onDelete: Cascade)
+  type      EventType
+  message   String
+  metadata  Json?
+  createdAt DateTime    @default(now())
+
+  @@index([emailId])
+  @@map("email_events")
+}
+
+model SlackConnection {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId      String
+  teamName    String
+  channelId   String?
+  channelName String?
+  accessToken String
+  botUserId   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("slack_connections")
+}

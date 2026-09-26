@@ -1,0 +1,29 @@
+{
+  "name": "reachflow-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "dev:api": "npm run dev --workspace=reachflow-api",
+    "dev:web": "npm run dev --workspace=reachflow-web",
+    "test": "npm run test --workspace=reachflow-api",
+    "test:rate-limit": "npm run test:rate-limit --workspace=reachflow-api",
+    "test:idempotency": "npm run test:idempotency --workspace=reachflow-api",
+    "test:restart": "npm run test:restart --workspace=reachflow-api",
+    "test:retry": "npm run test:retry --workspace=reachflow-api",
+    "test:throttle": "npm run test:throttle --workspace=reachflow-api"
+  },
+  "keywords": [
+    "email-scheduler",
+    "bullmq",
+    "redis",
+    "reachinbox",
+    "typescript"
+  ],
+  "author": "ReachInbox Candidate",
+  "license": "MIT"
+}
