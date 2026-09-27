@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@reachflow/shared": "file:../../packages/shared",
+    "@reachflow/shared": "file:../packages/shared",
     "axios": "^1.7.7",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",

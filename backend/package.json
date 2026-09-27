@@ -22,7 +22,7 @@
     "@bull-board/express": "^5.21.3",
     "@elastic/elasticsearch": "^8.14.0",
     "@prisma/client": "^5.19.1",
-    "@reachflow/shared": "file:../../packages/shared",
+    "@reachflow/shared": "file:../packages/shared",
     "@slack/web-api": "^7.3.3",
     "bullmq": "^5.12.9",
     "cookie-parser": "^1.4.6",

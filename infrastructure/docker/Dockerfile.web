@@ -4,19 +4,19 @@ WORKDIR /app
 
 COPY package*.json ./
 COPY packages/shared/package*.json ./packages/shared/
-COPY apps/web/package*.json ./apps/web/
+COPY frontend/package*.json ./frontend/
 
 RUN npm install
 
 COPY packages/shared ./packages/shared
 RUN npm run build --workspace=@reachflow/shared
 
-COPY apps/web ./apps/web
-WORKDIR /app/apps/web
+COPY frontend ./frontend
+WORKDIR /app/frontend
 RUN npm run build
 
 FROM nginx:alpine AS runner
-COPY --from=builder /app/apps/web/dist /usr/share/nginx/html
+COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 EXPOSE 3000
 
 # Basic nginx configuration for SPA routing and API reverse proxy

@@ -266,6 +266,6 @@ npm run test:retry
 
 ## 9. Submission Details & ClickUp Form Info
 
-- **Repository:** Monorepo (`apps/api`, `apps/web`, `packages/shared`, `infrastructure/docker`)
+- **Repository:** Monorepo (`backend`, `frontend`, `packages/shared`, `infrastructure/docker`)
 - **Reviewers:** Mitrajit Chandra & Yadav036
 - **Submission Form:** [ClickUp Assignment Submission](https://forms.clickup.com/9005062261/f/8cbwp3n-8876/6NNNJ92DV93PQTAYST)

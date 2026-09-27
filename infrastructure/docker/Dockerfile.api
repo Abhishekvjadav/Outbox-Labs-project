@@ -5,15 +5,15 @@ WORKDIR /app
 
 COPY package*.json ./
 COPY packages/shared/package*.json ./packages/shared/
-COPY apps/api/package*.json ./apps/api/
+COPY backend/package*.json ./backend/
 
 RUN npm install
 
 COPY packages/shared ./packages/shared
 RUN npm run build --workspace=@reachflow/shared
 
-COPY apps/api ./apps/api
-WORKDIR /app/apps/api
+COPY backend ./backend
+WORKDIR /app/backend
 RUN npx prisma generate
 RUN npm run build
 
@@ -26,16 +26,16 @@ ENV NODE_ENV=production
 
 COPY package*.json ./
 COPY packages/shared/package*.json ./packages/shared/
-COPY apps/api/package*.json ./apps/api/
+COPY backend/package*.json ./backend/
 
 RUN npm install --omit=dev
 
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
-COPY --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --from=builder /app/backend/dist ./backend/dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
+COPY --from=builder /app/backend/prisma ./backend/prisma
 
-WORKDIR /app/apps/api
+WORKDIR /app/backend
 
 EXPOSE 5000
 

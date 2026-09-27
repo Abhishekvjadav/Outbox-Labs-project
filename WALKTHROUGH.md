@@ -29,44 +29,43 @@ Cold email outreach requires sending millions of emails across distributed mailb
 
 ```
 Outbox Labs/
-├── apps/
-│   ├── api/                              # Express.js + TypeScript REST Backend
-│   │   ├── src/
-│   │   │   ├── config/env.ts             # Environment parser & validated configs
-│   │   │   ├── prisma/                   # Prisma schema, client singleton & seed script
-│   │   │   ├── queues/                   # BullMQ emailQueue & esIndexQueue, Redis config
-│   │   │   ├── services/                 # Atomic Lua RateLimiter, Ethereal SMTP, Slack, ES
-│   │   │   ├── workers/                  # emailWorker (concurrency 5x), esWorker
-│   │   │   ├── middleware/auth.ts        # Google OAuth session verification & JWT
-│   │   │   ├── controllers/              # Auth, Campaign, Email, Slack, Health
-│   │   │   ├── routes/apiRoutes.ts       # Unified API routing
-│   │   │   └── index.ts                  # Server entry & Bull Board (/admin/queues)
-│   │   ├── tests/                        # Automated reliability test suite
-│   │   │   ├── rate-limit.test.ts        # Atomic Redis Lua check-and-increment test
-│   │   │   ├── idempotency.test.ts       # Deterministic BullMQ job ID test
-│   │   │   ├── restart.test.ts           # Server kill & Redis persistence test
-│   │   │   ├── throttle.test.ts          # Per-sender start interval serialization test
-│   │   │   └── retry.test.ts             # BullMQ exponential backoff test
-│   │   ├── dist/                         # Compiled production JS
-│   │   └── package.json
-│   │
-│   └── web/                              # React + Vite + Tailwind CSS Frontend
-│       ├── src/
-│       │   ├── components/
-│       │   │   ├── layout/Header.tsx     # Real-time health pills, user profile, Bull Board
-│       │   │   ├── layout/TabNavigation  # Tab buttons with live counts & Compose CTA
-│       │   │   ├── campaign/ComposeModal # CSV pre-flight validator & dynamic estimator
-│       │   │   ├── emails/ScheduledTable # Scheduled emails table with ES search
-│       │   │   ├── emails/SentTable      # Sent emails with 1-click Ethereal preview
-│       │   │   ├── emails/DeliveryTimelineModal # Interactive visual audit drawer
-│       │   │   ├── senders/SendersView   # Multi-sender management & mailbox provisioner
-│       │   │   ├── integrations/Slack    # Slack OAuth card & test alert button
-│       │   │   └── auth/LoginPage.tsx    # Google OAuth login with candidate demo pass
-│       │   ├── lib/api.ts                # Typed Axios API client
-│       │   ├── App.tsx                   # Main state & polling coordinator
-│       │   └── main.tsx                  # React DOM entry
-│       ├── dist/                         # Production bundled assets
-│       └── package.json
+├── backend/                          # Express.js + TypeScript REST Backend
+│   ├── src/
+│   │   ├── config/env.ts             # Environment parser & validated configs
+│   │   ├── prisma/                   # Prisma schema, client singleton & seed script
+│   │   ├── queues/                   # BullMQ emailQueue & esIndexQueue, Redis config
+│   │   ├── services/                 # Atomic Lua RateLimiter, Ethereal SMTP, Slack, ES
+│   │   ├── workers/                  # emailWorker (concurrency 5x), esWorker
+│   │   ├── middleware/auth.ts        # Google OAuth session verification & JWT
+│   │   ├── controllers/              # Auth, Campaign, Email, Slack, Health
+│   │   ├── routes/apiRoutes.ts       # Unified API routing
+│   │   └── index.ts                  # Server entry & Bull Board (/admin/queues)
+│   ├── tests/                        # Automated reliability test suite
+│   │   ├── rate-limit.test.ts        # Atomic Redis Lua check-and-increment test
+│   │   ├── idempotency.test.ts       # Deterministic BullMQ job ID test
+│   │   ├── restart.test.ts           # Server kill & Redis persistence test
+│   │   ├── throttle.test.ts          # Per-sender start interval serialization test
+│   │   └── retry.test.ts             # BullMQ exponential backoff test
+│   ├── dist/                         # Compiled production JS
+│   └── package.json
+│
+├── frontend/                         # React + Vite + Tailwind CSS Frontend
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── layout/Header.tsx     # Real-time health pills, user profile, Bull Board
+│   │   │   ├── layout/TabNavigation  # Tab buttons with live counts & Compose CTA
+│   │   │   ├── campaign/ComposeModal # CSV pre-flight validator & dynamic estimator
+│   │   │   ├── emails/ScheduledTable # Scheduled emails table with ES search
+│   │   │   ├── emails/SentTable      # Sent emails with 1-click Ethereal preview
+│   │   │   ├── emails/DeliveryTimelineModal # Interactive visual audit drawer
+│   │   │   ├── senders/SendersView   # Multi-sender management & mailbox provisioner
+│   │   │   ├── integrations/Slack    # Slack OAuth card & test alert button
+│   │   │   └── auth/LoginPage.tsx    # Google OAuth login with candidate demo pass
+│   │   ├── lib/api.ts                # Typed Axios API client
+│   │   ├── App.tsx                   # Main state & polling coordinator
+│   │   └── main.tsx                  # React DOM entry
+│   ├── dist/                         # Production bundled assets
+│   └── package.json
 │
 ├── packages/
 │   └── shared/                           # Shared DTOs, Enums, Zod Schemas
