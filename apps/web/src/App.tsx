@@ -1,25 +1,27 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiClient } from './lib/api';
 import { UserDTO, SenderDTO, EmailDTO, EmailEventDTO, SystemHealthDTO, EmailMetricsDTO } from '@reachflow/shared';
+import { Sidebar, NavigationTab } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
-import { TabNavigation, TabType } from './components/layout/TabNavigation';
-import { ControlCenterOverview } from './components/dashboard/ControlCenterOverview';
+import { OverviewView } from './components/dashboard/OverviewView';
+import { EngineView } from './components/engine/EngineView';
+import { CampaignStudio } from './components/campaign/CampaignStudio';
 import { ScheduledTable } from './components/emails/ScheduledTable';
 import { SentTable } from './components/emails/SentTable';
 import { SendersView } from './components/senders/SendersView';
 import { SlackSettingsCard } from './components/integrations/SlackSettingsCard';
-import { ComposeModal } from './components/campaign/ComposeModal';
 import { DeliveryTimelineModal } from './components/emails/DeliveryTimelineModal';
 import { LoginPage } from './components/auth/LoginPage';
 
 export function App() {
   const [user, setUser] = useState<(UserDTO & { slackConnection?: any }) | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<TabType>('scheduled');
+  const [activeTab, setActiveTab] = useState<NavigationTab>('overview');
 
   // Telemetry & Metrics
   const [health, setHealth] = useState<(SystemHealthDTO & { queueCounts?: any }) | null>(null);
   const [metrics, setMetrics] = useState<EmailMetricsDTO | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Core Data
   const [senders, setSenders] = useState<SenderDTO[]>([]);
@@ -29,8 +31,7 @@ export function App() {
   const [sentTotal, setSentTotal] = useState(0);
   const [tableLoading, setTableLoading] = useState(false);
 
-  // Modals
-  const [isComposeOpen, setIsComposeOpen] = useState(false);
+  // Delivery Timeline Modal
   const [timelineEmail, setTimelineEmail] = useState<EmailDTO | null>(null);
   const [timelineEvents, setTimelineEvents] = useState<EmailEventDTO[]>([]);
   const [isTimelineOpen, setIsTimelineOpen] = useState(false);
@@ -46,6 +47,12 @@ export function App() {
     }
     if (tabParam === 'settings' || tabParam === 'slack') {
       setActiveTab('slack');
+    } else if (tabParam === 'engine') {
+      setActiveTab('engine');
+    } else if (tabParam === 'scheduled') {
+      setActiveTab('scheduled');
+    } else if (tabParam === 'sent') {
+      setActiveTab('sent');
     }
   }, []);
 
@@ -127,6 +134,20 @@ export function App() {
     } catch (e) {}
   }, [user]);
 
+  const handleManualRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        poll(),
+        fetchSenders(),
+        fetchScheduled(),
+        fetchSent(),
+      ]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   // Poll Health, Metrics & Tables every 4s
   useEffect(() => {
     if (!user) return;
@@ -138,8 +159,8 @@ export function App() {
 
     const interval = setInterval(() => {
       poll();
-      if (activeTab === 'scheduled') fetchScheduled();
-      if (activeTab === 'sent') fetchSent();
+      if (activeTab === 'scheduled' || activeTab === 'overview') fetchScheduled();
+      if (activeTab === 'sent' || activeTab === 'overview') fetchSent();
     }, 4000);
 
     return () => clearInterval(interval);
@@ -195,77 +216,112 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen bg-canvas text-slate-100 flex flex-col selection:bg-brand-500/30 selection:text-brand-200">
-      {/* Precision Infrastructure Header */}
-      <Header user={user} health={health} onLogout={handleLogout} />
-
-      {/* Main Control Center Canvas */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Outbound Infrastructure Overview & Metrics */}
-        <ControlCenterOverview
-          health={health}
-          metrics={metrics}
-          scheduledTotal={scheduledTotal}
-          sentTotal={sentTotal}
-          scheduledEmails={scheduledEmails}
-          sentEmails={sentEmails}
-          senders={senders}
-          onOpenCompose={() => setIsComposeOpen(true)}
-        />
-
-        {/* Tab Navigation & Sub-views */}
-        <TabNavigation
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          scheduledCount={metrics?.scheduled ?? scheduledTotal}
-          sentCount={metrics?.sent ?? sentTotal}
-          onOpenCompose={() => setIsComposeOpen(true)}
-        />
-
-        {/* Tab Views */}
-        {activeTab === 'scheduled' && (
-          <ScheduledTable
-            emails={scheduledEmails}
-            loading={tableLoading}
-            onViewTimeline={handleViewTimeline}
-            onCancelEmail={handleCancelEmail}
-            onSearch={(q) => fetchScheduled(q)}
-            total={scheduledTotal}
-            onOpenCompose={() => setIsComposeOpen(true)}
-          />
-        )}
-
-        {activeTab === 'sent' && (
-          <SentTable
-            emails={sentEmails}
-            loading={tableLoading}
-            onViewTimeline={handleViewTimeline}
-            onSearch={(q) => fetchSent(q)}
-            total={sentTotal}
-            onOpenCompose={() => setIsComposeOpen(true)}
-          />
-        )}
-
-        {activeTab === 'senders' && (
-          <SendersView senders={senders} onSenderCreated={fetchSenders} />
-        )}
-
-        {activeTab === 'slack' && (
-          <SlackSettingsCard slackConnection={user.slackConnection} onRefresh={fetchUser} />
-        )}
-      </main>
-
-      {/* Compose Campaign Modal */}
-      <ComposeModal
-        isOpen={isComposeOpen}
-        onClose={() => setIsComposeOpen(false)}
-        senders={senders}
-        onCampaignCreated={() => {
-          poll();
-          fetchScheduled();
-          setActiveTab('scheduled');
-        }}
+    <div className="min-h-screen bg-canvas text-slate-100 flex selection:bg-brand-500/30 selection:text-brand-200">
+      {/* 1. Persistent Left Sidebar */}
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        scheduledCount={metrics?.scheduled ?? scheduledTotal}
+        sentCount={metrics?.sent ?? sentTotal}
+        sendersCount={senders.length}
+        user={user}
+        health={health}
+        onLogout={handleLogout}
+        onOpenStudio={() => setActiveTab('studio')}
       />
+
+      {/* 2. Main Workspace Canvas */}
+      <div className="flex-1 min-w-0 flex flex-col min-h-screen bg-canvas">
+        {/* Top Header Bar */}
+        <Header
+          activeTab={activeTab}
+          user={user}
+          health={health}
+          onOpenStudio={() => setActiveTab('studio')}
+          onRefresh={handleManualRefresh}
+          refreshing={refreshing}
+        />
+
+        {/* Scrollable Content View */}
+        <main className="flex-1 p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          {/* View: Overview (Primary Homepage) */}
+          {activeTab === 'overview' && (
+            <OverviewView
+              user={user}
+              metrics={metrics}
+              scheduledTotal={scheduledTotal}
+              sentTotal={sentTotal}
+              scheduledEmails={scheduledEmails}
+              sentEmails={sentEmails}
+              senders={senders}
+              onOpenStudio={() => setActiveTab('studio')}
+              onViewTimeline={handleViewTimeline}
+              onNavigate={(tab) => setActiveTab(tab)}
+            />
+          )}
+
+          {/* View: Scheduled Pipeline */}
+          {activeTab === 'scheduled' && (
+            <ScheduledTable
+              emails={scheduledEmails}
+              loading={tableLoading}
+              onViewTimeline={handleViewTimeline}
+              onCancelEmail={handleCancelEmail}
+              onSearch={(q) => fetchScheduled(q)}
+              total={scheduledTotal}
+              onOpenCompose={() => setActiveTab('studio')}
+            />
+          )}
+
+          {/* View: Delivered (Sent) */}
+          {activeTab === 'sent' && (
+            <SentTable
+              emails={sentEmails}
+              loading={tableLoading}
+              onViewTimeline={handleViewTimeline}
+              onSearch={(q) => fetchSent(q)}
+              total={sentTotal}
+              onOpenCompose={() => setActiveTab('studio')}
+            />
+          )}
+
+          {/* View: Campaign Studio (Two-Column Campaign Planner) */}
+          {activeTab === 'studio' && (
+            <CampaignStudio
+              senders={senders}
+              onCampaignCreated={() => {
+                poll();
+                fetchScheduled();
+                setActiveTab('scheduled');
+              }}
+              onCancel={() => setActiveTab('overview')}
+            />
+          )}
+
+          {/* View: Engine Telemetry (Operations -> Engine) */}
+          {activeTab === 'engine' && (
+            <EngineView
+              health={health}
+              metrics={metrics}
+              scheduledTotal={scheduledTotal}
+              sentTotal={sentTotal}
+              scheduledEmails={scheduledEmails}
+              sentEmails={sentEmails}
+              senders={senders}
+            />
+          )}
+
+          {/* View: Mailboxes (Operations -> Mailboxes) */}
+          {activeTab === 'senders' && (
+            <SendersView senders={senders} onSenderCreated={fetchSenders} />
+          )}
+
+          {/* View: Settings (Slack Integration & Channel Setup) */}
+          {activeTab === 'slack' && (
+            <SlackSettingsCard slackConnection={user.slackConnection} onRefresh={fetchUser} />
+          )}
+        </main>
+      </div>
 
       {/* Delivery Timeline Audit Modal */}
       <DeliveryTimelineModal

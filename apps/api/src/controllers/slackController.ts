@@ -6,6 +6,11 @@ import { config } from '../config/env';
 export class SlackController {
   public static getAuthUrl(req: Request, res: Response) {
     const userId = req.user!.id;
+    if (!config.slackClientId) {
+      return res.status(400).json({
+        error: 'Slack Client ID is not configured. Please set SLACK_CLIENT_ID in your environment or .env file.',
+      });
+    }
     const url = slackService.getAuthorizationUrl(userId);
     return res.json({ url });
   }
