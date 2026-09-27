@@ -86,7 +86,10 @@ describe('Email worker idempotency', () => {
 
     (prisma.email.findUnique as jest.Mock).mockResolvedValue(email);
     (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
-      if (!where.status.in.includes(email.status)) {
+      if (where.status?.in && !where.status.in.includes(email.status)) {
+        return { count: 0 };
+      }
+      if (where.status?.not && where.status.not === email.status) {
         return { count: 0 };
       }
       email.status = data.status;
@@ -98,6 +101,7 @@ describe('Email worker idempotency', () => {
 
     const transactionClient = {
       email: { updateMany: prisma.email.updateMany },
+      campaign: { update: prisma.campaign.update },
       emailEvent: { create: prisma.emailEvent.create },
     };
     (prisma.$transaction as jest.Mock).mockImplementation(async (operation) =>
@@ -117,6 +121,7 @@ describe('Email worker idempotency', () => {
       (worker as any).processEmailJob(emailId, job),
     ]);
 
+    // Winner claims (1) + winner finalizes (1); concurrent worker detects active lease in PROCESSING and skips safely
     expect(prisma.email.updateMany).toHaveBeenCalledTimes(2);
     expect(etherealService.sendEmail).toHaveBeenCalledTimes(1);
   });

@@ -80,7 +80,7 @@ jest.mock('../src/services/slack', () => ({
   slackService: { sendDeduplicatedRateLimitAlert: jest.fn() },
 }));
 
-import { EmailStatus } from '@reachflow/shared';
+import { EmailStatus, EventType } from '@reachflow/shared';
 import { Job } from 'bullmq';
 import { EmailJobData } from '../src/queues/emailQueue';
 import { prisma } from '../src/prisma/client';
@@ -135,9 +135,29 @@ describe('Post-SMTP / Database Failure Safety', () => {
     const email = createMockEmail(emailId, EmailStatus.SCHEDULED);
 
     (prisma.email.findUnique as jest.Mock).mockImplementation(async () => ({ ...email }));
+
+    let finalizationAttempts = 0;
     (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
-      if (!where.status.in.includes(email.status)) {
-        return { count: 0 };
+      // Claim logic
+      if (where.status?.in) {
+        if (!where.status.in.includes(email.status)) {
+          return { count: 0 };
+        }
+        email.status = data.status;
+        return { count: 1 };
+      }
+      // Finalization logic (where.status.not: EmailStatus.SENT)
+      if (where.status?.not) {
+        finalizationAttempts++;
+        if (finalizationAttempts <= 3) {
+          // Fail all 3 local attempts in Attempt 1 to simulate a persistent DB outage
+          throw new Error('Database connection lost during SENT update');
+        }
+        if (email.status === where.status.not) {
+          return { count: 0 };
+        }
+        email.status = data.status;
+        return { count: 1 };
       }
       email.status = data.status;
       return { count: 1 };
@@ -149,29 +169,17 @@ describe('Post-SMTP / Database Failure Safety', () => {
     };
     (etherealService.sendEmail as jest.Mock).mockResolvedValue(originalSmtpResult);
 
-    // Setup transaction mock:
-    // Attempt 1: Claim transaction succeeds, but finalization transaction fails
-    // Attempt 2: Finalization transaction succeeds
-    let finalizationAttempts = 0;
+    const txClient = {
+      email: { updateMany: prisma.email.updateMany },
+      campaign: { update: prisma.campaign.update },
+      emailEvent: { create: prisma.emailEvent.create },
+    };
     (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
       if (typeof arg === 'function') {
-        // Atomic claim callback
-        const txClient = {
-          email: { updateMany: prisma.email.updateMany },
-          emailEvent: { create: prisma.emailEvent.create },
-        };
         return arg(txClient);
       }
       if (Array.isArray(arg)) {
-        // Finalization transaction batch: [email.update, campaign.update, emailEvent.create]
-        finalizationAttempts++;
-        if (finalizationAttempts <= 3) {
-          // Fail all 3 local attempts in Attempt 1 to simulate a persistent DB outage
-          throw new Error('Database connection lost during SENT update');
-        }
-        // Attempt 2 (retry): DB has recovered, update email state to SENT
-        email.status = EmailStatus.SENT;
-        return [{}, {}, {}];
+        return Promise.all(arg);
       }
     });
 
@@ -205,10 +213,13 @@ describe('Post-SMTP / Database Failure Safety', () => {
     // Final email state is now SENT in PostgreSQL
     expect(email.status).toBe(EmailStatus.SENT);
 
-    // Verify the messageId and previewUrl used for DB update came from the original SMTP result
-    expect(prisma.email.update).toHaveBeenCalledWith(
+    // Verify updateMany was called with conditional not: SENT and original messageId
+    expect(prisma.email.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: emailId },
+        where: expect.objectContaining({
+          id: emailId,
+          status: { not: EmailStatus.SENT },
+        }),
         data: expect.objectContaining({
           status: EmailStatus.SENT,
           messageId: originalSmtpResult.messageId,
@@ -228,7 +239,10 @@ describe('Post-SMTP / Database Failure Safety', () => {
 
     (prisma.email.findUnique as jest.Mock).mockImplementation(async () => ({ ...email }));
     (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
-      if (!where.status.in.includes(email.status)) {
+      if (where.status?.in && !where.status.in.includes(email.status)) {
+        return { count: 0 };
+      }
+      if (where.status?.not && email.status === where.status.not) {
         return { count: 0 };
       }
       email.status = data.status;
@@ -239,12 +253,13 @@ describe('Post-SMTP / Database Failure Safety', () => {
       return {};
     });
 
+    const txClient = {
+      email: { updateMany: prisma.email.updateMany, update: prisma.email.update },
+      campaign: { update: prisma.campaign.update },
+      emailEvent: { create: prisma.emailEvent.create },
+    };
     (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
       if (typeof arg === 'function') {
-        const txClient = {
-          email: { updateMany: prisma.email.updateMany },
-          emailEvent: { create: prisma.emailEvent.create },
-        };
         return arg(txClient);
       }
       if (Array.isArray(arg)) {
@@ -296,9 +311,20 @@ describe('Post-SMTP / Database Failure Safety', () => {
     const email = createMockEmail(emailId, EmailStatus.SCHEDULED);
 
     (prisma.email.findUnique as jest.Mock).mockImplementation(async () => ({ ...email }));
+
+    let finalizationAttempts = 0;
     (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
-      if (!where.status.in.includes(email.status)) {
+      if (where.status?.in && !where.status.in.includes(email.status)) {
         return { count: 0 };
+      }
+      if (where.status?.not) {
+        finalizationAttempts++;
+        if (finalizationAttempts === 1) {
+          throw new Error('Lock contention on campaign counter');
+        }
+        if (email.status === where.status.not) {
+          return { count: 0 };
+        }
       }
       email.status = data.status;
       return { count: 1 };
@@ -309,23 +335,17 @@ describe('Post-SMTP / Database Failure Safety', () => {
       previewUrl: false,
     });
 
-    // Simulate transient failure: first finalization attempt throws, second succeeds
-    let dbFinalizationCount = 0;
+    const txClient = {
+      email: { updateMany: prisma.email.updateMany },
+      campaign: { update: prisma.campaign.update },
+      emailEvent: { create: prisma.emailEvent.create },
+    };
     (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
       if (typeof arg === 'function') {
-        const txClient = {
-          email: { updateMany: prisma.email.updateMany },
-          emailEvent: { create: prisma.emailEvent.create },
-        };
         return arg(txClient);
       }
       if (Array.isArray(arg)) {
-        dbFinalizationCount++;
-        if (dbFinalizationCount === 1) {
-          throw new Error('Lock contention on campaign counter');
-        }
-        email.status = EmailStatus.SENT;
-        return [{}, {}, {}];
+        return Promise.all(arg);
       }
     });
 
@@ -338,7 +358,7 @@ describe('Post-SMTP / Database Failure Safety', () => {
     expect(etherealService.sendEmail).toHaveBeenCalledTimes(1);
 
     // DB finalization transaction was attempted multiple times (transient recovery)
-    expect(dbFinalizationCount).toBe(2);
+    expect(finalizationAttempts).toBe(2);
 
     // Final state is SENT
     expect(email.status).toBe(EmailStatus.SENT);
@@ -354,10 +374,25 @@ describe('Post-SMTP / Database Failure Safety', () => {
     const email = createMockEmail(emailId, EmailStatus.PROCESSING);
 
     (prisma.email.findUnique as jest.Mock).mockImplementation(async () => ({ ...email }));
+    (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+      if (where.status?.not && email.status === where.status.not) {
+        return { count: 0 };
+      }
+      email.status = data.status;
+      return { count: 1 };
+    });
+
+    const txClient = {
+      email: { updateMany: prisma.email.updateMany },
+      campaign: { update: prisma.campaign.update },
+      emailEvent: { create: prisma.emailEvent.create },
+    };
     (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
+      if (typeof arg === 'function') {
+        return arg(txClient);
+      }
       if (Array.isArray(arg)) {
-        email.status = EmailStatus.SENT;
-        return [{}, {}, {}];
+        return Promise.all(arg);
       }
     });
 
@@ -375,10 +410,13 @@ describe('Post-SMTP / Database Failure Safety', () => {
     // SMTP send must NOT be called
     expect(etherealService.sendEmail).not.toHaveBeenCalled();
 
-    // PostgreSQL finalization was executed using the pre-existing messageId
-    expect(prisma.email.update).toHaveBeenCalledWith(
+    // PostgreSQL finalization was executed using updateMany with not: SENT
+    expect(prisma.email.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: emailId },
+        where: expect.objectContaining({
+          id: emailId,
+          status: { not: EmailStatus.SENT },
+        }),
         data: expect.objectContaining({
           status: EmailStatus.SENT,
           messageId: preExistingReceipt.messageId,
@@ -407,5 +445,504 @@ describe('Post-SMTP / Database Failure Safety', () => {
     expect(etherealService.sendEmail).not.toHaveBeenCalled();
     // Must not attempt claim or finalization
     expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  /**
+   * =========================================================================
+   * STEP 4 ATOMIC FINALIZATION IDEMPOTENCY TESTS
+   * =========================================================================
+   */
+  describe('Atomic Finalization Idempotency', () => {
+    /**
+     * TEST 1 — Repeated Finalization
+     * Call the finalization path twice for the same email/receipt.
+     * Expected:
+     * - email status = SENT
+     * - campaign.sentEmails increments exactly once
+     * - exactly one SMTP_DELIVERED event exists
+     * - SMTP is not called a second time
+     */
+    it('repeated finalization calls increment campaign counter and create event exactly once', async () => {
+      const emailId = 'email-repeated-finalization-test';
+      const email = createMockEmail(emailId, EmailStatus.PROCESSING);
+      let campaignSentEmails = 0;
+      let emailEventsCreated = 0;
+
+      (prisma.email.findUnique as jest.Mock).mockImplementation(async () => ({ ...email }));
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+        if (where.status?.not && email.status === where.status.not) {
+          return { count: 0 };
+        }
+        email.status = data.status;
+        return { count: 1 };
+      });
+      (prisma.campaign.update as jest.Mock).mockImplementation(async () => {
+        campaignSentEmails++;
+        return {};
+      });
+      (prisma.emailEvent.create as jest.Mock).mockImplementation(async () => {
+        emailEventsCreated++;
+        return {};
+      });
+
+      const txClient = {
+        email: { updateMany: prisma.email.updateMany },
+        campaign: { update: prisma.campaign.update },
+        emailEvent: { create: prisma.emailEvent.create },
+      };
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
+        if (typeof arg === 'function') {
+          return arg(txClient);
+        }
+      });
+
+      const receipt: DispatchReceipt = {
+        messageId: '<repeated-test-123@ethereal.email>',
+        previewUrl: 'https://ethereal.email/message/123',
+        sentAt: new Date().toISOString(),
+      };
+
+      // Call 1: First finalization succeeds (count = 1)
+      await (worker as any).finalizeSentStatus(emailId, email.campaignId, receipt);
+
+      expect(email.status).toBe(EmailStatus.SENT);
+      expect(campaignSentEmails).toBe(1);
+      expect(emailEventsCreated).toBe(1);
+
+      // Call 2: Repeated finalization for the same email (count = 0 because status is already SENT)
+      await (worker as any).finalizeSentStatus(emailId, email.campaignId, receipt);
+
+      // Verifications:
+      // Status remains SENT
+      expect(email.status).toBe(EmailStatus.SENT);
+      // Counter was NOT incremented again
+      expect(campaignSentEmails).toBe(1);
+      // Duplicate event was NOT created
+      expect(emailEventsCreated).toBe(1);
+      // SMTP was never called
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+    });
+
+    /**
+     * TEST 2 — Concurrent Finalization
+     * Simulate two concurrent finalization attempts for the same email/receipt.
+     * Expected:
+     * - both calls resolve safely
+     * - exactly one finalization wins
+     * - campaign.sentEmails increments exactly once
+     * - exactly one SMTP_DELIVERED event exists
+     * - final email status = SENT
+     *
+     * Note on Concurrency Model:
+     * In this unit test suite, concurrency is modeled via asynchronous event loop interleaved promises
+     * against shared state. In production, PostgreSQL handles this via row-level locks on the conditional
+     * UPDATE ... WHERE status != 'SENT'.
+     */
+    it('simultaneous concurrent finalizations resolve safely with exactly one winning finalizer', async () => {
+      const emailId = 'email-concurrent-finalization-test';
+      const email = createMockEmail(emailId, EmailStatus.PROCESSING);
+      let campaignSentEmails = 0;
+      let emailEventsCreated = 0;
+      let winningFinalizations = 0;
+      let noOpFinalizations = 0;
+
+      (prisma.email.findUnique as jest.Mock).mockImplementation(async () => ({ ...email }));
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+        // Atomic conditional check in PostgreSQL: WHERE id = $1 AND status != 'SENT'
+        if (where.status?.not && email.status === where.status.not) {
+          noOpFinalizations++;
+          return { count: 0 };
+        }
+        winningFinalizations++;
+        email.status = data.status;
+        return { count: 1 };
+      });
+      (prisma.campaign.update as jest.Mock).mockImplementation(async () => {
+        campaignSentEmails++;
+        return {};
+      });
+      (prisma.emailEvent.create as jest.Mock).mockImplementation(async () => {
+        emailEventsCreated++;
+        return {};
+      });
+
+      const txClient = {
+        email: { updateMany: prisma.email.updateMany },
+        campaign: { update: prisma.campaign.update },
+        emailEvent: { create: prisma.emailEvent.create },
+      };
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
+        if (typeof arg === 'function') {
+          return arg(txClient);
+        }
+      });
+
+      const receipt: DispatchReceipt = {
+        messageId: '<concurrent-test-999@ethereal.email>',
+        previewUrl: false,
+        sentAt: new Date().toISOString(),
+      };
+
+      // Execute two finalization attempts concurrently
+      const [res1, res2] = await Promise.allSettled([
+        (worker as any).finalizeSentStatus(emailId, email.campaignId, receipt),
+        (worker as any).finalizeSentStatus(emailId, email.campaignId, receipt),
+      ]);
+
+      // Both promises must resolve safely (fulfilled)
+      expect(res1.status).toBe('fulfilled');
+      expect(res2.status).toBe('fulfilled');
+
+      // Exactly one finalization won the race
+      expect(winningFinalizations).toBe(1);
+      expect(noOpFinalizations).toBe(1);
+
+      // Campaign counter incremented exactly ONCE
+      expect(campaignSentEmails).toBe(1);
+
+      // Delivery event created exactly ONCE
+      expect(emailEventsCreated).toBe(1);
+
+      // Final state is SENT
+      expect(email.status).toBe(EmailStatus.SENT);
+    });
+
+    /**
+     * TEST 3 — Existing SENT email
+     * Verify that attempting finalization on an already-SENT email does not:
+     * - increment campaign counter
+     * - create another SMTP_DELIVERED event
+     * - throw an unnecessary error
+     */
+    it('attempting finalization on an already-SENT email is a safe no-op', async () => {
+      const emailId = 'email-already-sent-finalization-test';
+      const email = createMockEmail(emailId, EmailStatus.SENT);
+
+      (prisma.email.findUnique as jest.Mock).mockImplementation(async () => ({ ...email }));
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+        if (where.status?.not && email.status === where.status.not) {
+          return { count: 0 };
+        }
+        email.status = data.status;
+        return { count: 1 };
+      });
+
+      const txClient = {
+        email: { updateMany: prisma.email.updateMany },
+        campaign: { update: prisma.campaign.update },
+        emailEvent: { create: prisma.emailEvent.create },
+      };
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
+        if (typeof arg === 'function') {
+          return arg(txClient);
+        }
+      });
+
+      const receipt: DispatchReceipt = {
+        messageId: '<already-sent-456@ethereal.email>',
+        previewUrl: false,
+        sentAt: new Date().toISOString(),
+      };
+
+      // Directly invoke finalization on already-SENT email
+      await expect(
+        (worker as any).finalizeSentStatus(emailId, email.campaignId, receipt)
+      ).resolves.toBeUndefined();
+
+      // Assert counter and event were not called
+      expect(prisma.campaign.update).not.toHaveBeenCalled();
+      expect(prisma.emailEvent.create).not.toHaveBeenCalled();
+      expect(email.status).toBe(EmailStatus.SENT);
+    });
+  });
+
+  describe('Step 5 — Safe PROCESSING Recovery & Crash Handling', () => {
+    /**
+     * TEST 1 & 4 — Abandoned worker recovery: transitions to FAILED + DLQ_MOVED without calling SMTP
+     */
+    it('recovers abandoned worker in PROCESSING state: transitions to FAILED and creates DLQ_MOVED without calling SMTP', async () => {
+      const emailId = 'email-abandoned-worker-test';
+      const expiredUpdatedAt = new Date(Date.now() - (EmailWorkerService.LEASE_TIMEOUT_MS + 10000));
+      const email = {
+        ...createMockEmail(emailId, EmailStatus.PROCESSING),
+        attempts: 1,
+        updatedAt: expiredUpdatedAt,
+      };
+
+      let emailStatus: string = EmailStatus.PROCESSING;
+      let emailError: string | null = null;
+      let dlqEventCreated = false;
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+        if (where.status === EmailStatus.PROCESSING && where.attempts === email.attempts) {
+          emailStatus = data.status;
+          emailError = data.error;
+          return { count: 1 };
+        }
+        return { count: 0 };
+      });
+      (prisma.emailEvent.create as jest.Mock).mockImplementation(async ({ data }) => {
+        if (data.type === EventType.DLQ_MOVED) {
+          dlqEventCreated = true;
+        }
+        return {};
+      });
+
+      const txClient = {
+        email: { updateMany: prisma.email.updateMany },
+        campaign: { update: prisma.campaign.update },
+        emailEvent: { create: prisma.emailEvent.create },
+      };
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
+        if (typeof arg === 'function') {
+          return arg(txClient);
+        }
+        return Promise.all(arg);
+      });
+
+      const job = {
+        id: `email-send-${emailId}`,
+        data: { emailId },
+        opts: { attempts: 3 },
+        attemptsMade: 1, // BullMQ retry attempt
+      } as Job<EmailJobData>;
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      expect(emailStatus).toBe(EmailStatus.FAILED);
+      expect(emailError).toContain('Ambiguous worker crash');
+      expect(dlqEventCreated).toBe(true);
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+      expect(prisma.campaign.update).not.toHaveBeenCalled();
+    });
+
+    /**
+     * TEST 2 — PROCESSING + receipt → finalize without SMTP
+     */
+    it('finalizes email in PROCESSING state to SENT using existing Redis receipt without calling SMTP', async () => {
+      const emailId = 'email-processing-with-receipt-test';
+      const email = createMockEmail(emailId, EmailStatus.PROCESSING);
+      let emailStatus: string = EmailStatus.PROCESSING;
+      let campaignSentEmails = 0;
+      let deliveryEventCreated = false;
+
+      const receipt: DispatchReceipt = {
+        messageId: '<pre-existing-proc-msg@ethereal.email>',
+        previewUrl: 'https://ethereal.email/message/proc-123',
+        sentAt: new Date().toISOString(),
+      };
+      await mockRedisClient.set(`reachflow:dispatch_receipt:${emailId}`, JSON.stringify(receipt));
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+        if (where.status?.not && emailStatus === where.status.not) {
+          return { count: 0 };
+        }
+        emailStatus = data.status;
+        return { count: 1 };
+      });
+      (prisma.campaign.update as jest.Mock).mockImplementation(async () => {
+        campaignSentEmails++;
+        return {};
+      });
+      (prisma.emailEvent.create as jest.Mock).mockImplementation(async ({ data }) => {
+        if (data.type === EventType.SMTP_DELIVERED) {
+          deliveryEventCreated = true;
+        }
+        return {};
+      });
+
+      const txClient = {
+        email: { updateMany: prisma.email.updateMany },
+        campaign: { update: prisma.campaign.update },
+        emailEvent: { create: prisma.emailEvent.create },
+      };
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
+        if (typeof arg === 'function') {
+          return arg(txClient);
+        }
+        return Promise.all(arg);
+      });
+
+      const job = {
+        id: `email-send-${emailId}`,
+        data: { emailId },
+        opts: { attempts: 3 },
+        attemptsMade: 1,
+      } as Job<EmailJobData>;
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      expect(emailStatus).toBe(EmailStatus.SENT);
+      expect(campaignSentEmails).toBe(1);
+      expect(deliveryEventCreated).toBe(true);
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+    });
+
+    /**
+     * TEST 3 — PROCESSING + no receipt + ambiguous state → do not blindly resend
+     */
+    it('does not blindly resend SMTP when in PROCESSING state with no dispatch receipt on retry', async () => {
+      const emailId = 'email-ambiguous-no-resend-test';
+      const email = {
+        ...createMockEmail(emailId, EmailStatus.PROCESSING),
+        attempts: 1,
+        updatedAt: new Date(),
+      };
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+      (prisma.email.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.emailEvent.create as jest.Mock).mockResolvedValue({});
+
+      const txClient = {
+        email: { updateMany: prisma.email.updateMany },
+        campaign: { update: prisma.campaign.update },
+        emailEvent: { create: prisma.emailEvent.create },
+      };
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) => {
+        if (typeof arg === 'function') {
+          return arg(txClient);
+        }
+        return Promise.all(arg);
+      });
+
+      const job = {
+        id: `email-send-${emailId}`,
+        data: { emailId },
+        opts: { attempts: 3 },
+        attemptsMade: 1, // retry attempt
+      } as Job<EmailJobData>;
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Must never call SMTP on ambiguous retry
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+    });
+
+    /**
+     * TEST 5 — Receipt Redis transient failure → bounded retry
+     */
+    it('retries saving dispatch receipt with bounded backoff upon transient Redis failure and succeeds', async () => {
+      const emailId = 'email-redis-transient-test';
+      const receipt: DispatchReceipt = {
+        messageId: '<transient-test@ethereal.email>',
+        previewUrl: false,
+        sentAt: new Date().toISOString(),
+      };
+
+      let attemptCount = 0;
+      mockRedisClient.set.mockImplementation(async (key: string, value: string) => {
+        attemptCount++;
+        if (attemptCount === 1) {
+          throw new Error('Redis connection reset');
+        }
+        redisStore.set(key, value);
+        return 'OK';
+      });
+
+      const result = await (worker as any).saveDispatchReceipt(emailId, receipt);
+
+      expect(attemptCount).toBe(2);
+      expect(result).not.toBeNull();
+      expect(result.messageId).toBe(receipt.messageId);
+      expect(redisStore.has(`reachflow:dispatch_receipt:${emailId}`)).toBe(true);
+    });
+
+    /**
+     * TEST 6 — Receipt Redis persistent failure → safe failure behavior
+     */
+    it('handles persistent Redis receipt failure safely: enters DLQ without duplicate send when DB also fails', async () => {
+      const emailId = 'email-redis-persistent-test';
+      const email = createMockEmail(emailId, EmailStatus.SCHEDULED);
+      let emailStatus: string = EmailStatus.SCHEDULED;
+      let dlqEventCreated = false;
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ data }: any) => {
+        // Track emailStatus for the fallback path (dual-failure handler uses updateMany with PROCESSING guard)
+        if (data?.status) {
+          emailStatus = data.status;
+        }
+        return { count: 1 };
+      });
+      (prisma.email.update as jest.Mock).mockImplementation(async ({ data }: any) => {
+        emailStatus = data.status;
+        return {};
+      });
+      (prisma.emailEvent.create as jest.Mock).mockImplementation(async ({ data }: any) => {
+        if (data.type === EventType.DLQ_MOVED) {
+          dlqEventCreated = true;
+        }
+        return {};
+      });
+      let txCalls = 0;
+      const txClient = {
+        email: { updateMany: prisma.email.updateMany, update: prisma.email.update },
+        campaign: { update: prisma.campaign.update },
+        emailEvent: { create: prisma.emailEvent.create },
+      };
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg: any) => {
+        if (Array.isArray(arg)) {
+          return Promise.all(arg);
+        }
+        txCalls++;
+        if (txCalls === 1) {
+          // Call 1: Claim transaction succeeds
+          return arg(txClient);
+        }
+        // Call 2+: Finalization transaction fails to trigger dual failure
+        throw new Error('Database connection lost');
+      });
+
+      (etherealService.sendEmail as jest.Mock).mockResolvedValue({
+        messageId: '<persistent-fail-msg@ethereal.email>',
+        previewUrl: false,
+      });
+
+      // Persistent Redis failure
+      mockRedisClient.set.mockRejectedValue(new Error('Redis connection refused'));
+
+      const job = {
+        id: `email-send-${emailId}`,
+        data: { emailId },
+        opts: { attempts: 3 },
+        attemptsMade: 0,
+      } as Job<EmailJobData>;
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Dual failure must be caught and transitioned to FAILED (DLQ)
+      expect(emailStatus).toBe(EmailStatus.FAILED);
+      expect(dlqEventCreated).toBe(true);
+    });
+
+    /**
+     * Active lease guard test
+     */
+    it('skips execution safely when an active peer worker holds an unexpired lease in PROCESSING state', async () => {
+      const emailId = 'email-active-lease-test';
+      const email = {
+        ...createMockEmail(emailId, EmailStatus.PROCESSING),
+        attempts: 1,
+        updatedAt: new Date(), // lease is fresh
+      };
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+
+      const job = {
+        id: `email-send-${emailId}`,
+        data: { emailId },
+        opts: { attempts: 3 },
+        attemptsMade: 0, // initial attempt
+      } as Job<EmailJobData>;
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Must not touch email, must not call SMTP
+      expect(prisma.email.updateMany).not.toHaveBeenCalled();
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+      expect(prisma.emailEvent.create).not.toHaveBeenCalled();
+    });
   });
 });

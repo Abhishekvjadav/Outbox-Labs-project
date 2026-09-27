@@ -16,9 +16,11 @@ export interface DispatchReceipt {
 
 const DISPATCH_RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days retention
 const DISPATCH_RECEIPT_KEY_PREFIX = 'reachflow:dispatch_receipt:';
+export const PROCESSING_LEASE_TIMEOUT_MS = 60 * 1000; // 60 seconds lease window
 
 export class EmailWorkerService {
   private worker: Worker<EmailJobData> | null = null;
+  public static LEASE_TIMEOUT_MS = PROCESSING_LEASE_TIMEOUT_MS;
 
   public start(): Worker<EmailJobData> {
     if (this.worker) {
@@ -66,26 +68,46 @@ export class EmailWorkerService {
     }
   }
 
-  private async saveDispatchReceipt(emailId: string, receipt: DispatchReceipt): Promise<DispatchReceipt> {
+  private async saveDispatchReceipt(emailId: string, receipt: DispatchReceipt): Promise<DispatchReceipt | null> {
     const key = this.getReceiptKey(emailId);
-    try {
-      if (!redisClient || typeof redisClient.set !== 'function') {
-        return receipt;
+    const maxAttempts = 3;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        if (!redisClient || typeof redisClient.set !== 'function') {
+          return receipt;
+        }
+        // Use NX to guarantee atomic write without overwriting existing authoritative receipt
+        const res = await redisClient.set(key, JSON.stringify(receipt), 'EX', DISPATCH_RECEIPT_TTL_SECONDS, 'NX');
+        if (res === 'OK') {
+          return receipt;
+        }
+        // NX was rejected — another write beat us. Read the existing authoritative receipt.
+        const existingRaw = await redisClient.get(key);
+        if (existingRaw) {
+          return JSON.parse(existingRaw) as DispatchReceipt;
+        }
+        // GET returned nothing: the key was evicted or lost in the NX→GET race window.
+        // Do NOT return the in-memory receipt as authoritative — persistence is unconfirmed.
+        return null;
+      } catch (err) {
+        lastError = err;
+        console.warn(
+          `[EmailWorker] Redis dispatch receipt save attempt ${attempt}/${maxAttempts} failed for email ${emailId}:`,
+          (err as Error).message
+        );
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+        }
       }
-      // Use NX to guarantee atomic write without overwriting existing authoritative receipt
-      const res = await redisClient.set(key, JSON.stringify(receipt), 'EX', DISPATCH_RECEIPT_TTL_SECONDS, 'NX');
-      if (res === 'OK') {
-        return receipt;
-      }
-      // If NX returned null/not OK, a receipt was already recorded; read and treat as authoritative
-      const existingRaw = await redisClient.get(key);
-      if (existingRaw) {
-        return JSON.parse(existingRaw) as DispatchReceipt;
-      }
-    } catch (err) {
-      console.error(`[EmailWorker] Failed to record dispatch receipt for ${emailId}:`, (err as Error).message);
     }
-    return receipt;
+
+    console.error(
+      `[EmailWorker] CRITICAL: Persistently failed to record dispatch receipt in Redis for ${emailId} after ${maxAttempts} attempts:`,
+      (lastError as Error)?.message
+    );
+    return null;
   }
 
   private async finalizeSentStatus(
@@ -98,49 +120,70 @@ export class EmailWorkerService {
 
     for (let attempt = 1; attempt <= maxLocalAttempts; attempt++) {
       try {
-        await prisma.$transaction([
-          prisma.email.update({
-            where: { id: emailId },
+        const finalized = await prisma.$transaction(async (tx) => {
+          const result = await tx.email.updateMany({
+            where: {
+              id: emailId,
+              status: {
+                not: EmailStatus.SENT,
+              },
+            },
             data: {
               status: EmailStatus.SENT,
               sentAt: new Date(receipt.sentAt),
               messageId: receipt.messageId,
               previewUrl: receipt.previewUrl ? receipt.previewUrl : null,
             },
-          }),
-          prisma.campaign.update({
-            where: { id: campaignId },
-            data: {
-              sentEmails: { increment: 1 },
-            },
-          }),
-          prisma.emailEvent.create({
-            data: {
-              emailId,
-              type: EventType.SMTP_DELIVERED,
-              message: `Email successfully delivered to SMTP server. Message-ID: ${receipt.messageId}`,
-              metadata: {
-                messageId: receipt.messageId,
-                previewUrl: receipt.previewUrl || null,
+          });
+
+          if (result.count === 1) {
+            const campaignClient = tx.campaign || prisma.campaign;
+            await campaignClient.update({
+              where: { id: campaignId },
+              data: {
+                sentEmails: { increment: 1 },
               },
-            },
-          }),
-        ]);
+            });
 
-        console.log(`[EmailWorker] Email ${emailId} successfully finalized as SENT`);
-        if (receipt.previewUrl) {
-          console.log(`[EmailWorker] Preview URL: ${receipt.previewUrl}`);
-        }
+            const eventClient = tx.emailEvent || prisma.emailEvent;
+            await eventClient.create({
+              data: {
+                emailId,
+                type: EventType.SMTP_DELIVERED,
+                message: `Email successfully delivered to SMTP server. Message-ID: ${receipt.messageId}`,
+                metadata: {
+                  messageId: receipt.messageId,
+                  previewUrl: receipt.previewUrl || null,
+                },
+              },
+            });
 
-        // ASYNC DECOUPLED ELASTICSEARCH INDEXING (Isolated search projection)
-        try {
-          await esIndexQueue.add(
-            'index-email',
-            { emailId, action: 'update' },
-            { jobId: `es-index-${emailId}` }
+            return true;
+          }
+
+          return false;
+        });
+
+        if (finalized) {
+          console.log(`[EmailWorker] Email ${emailId} successfully finalized as SENT`);
+          if (receipt.previewUrl) {
+            console.log(`[EmailWorker] Preview URL: ${receipt.previewUrl}`);
+          }
+
+          // ASYNC DECOUPLED ELASTICSEARCH INDEXING (Isolated search projection)
+          try {
+            await esIndexQueue.add(
+              'index-email',
+              { emailId, action: 'update' },
+              { jobId: `es-index-${emailId}` }
+            );
+          } catch (queueErr) {
+            console.warn('[EmailWorker] Could not queue ES indexing:', (queueErr as Error).message);
+          }
+        } else {
+          console.log(
+            `[EmailWorker] Email ${emailId} was already finalized as SENT. Skipping counter increment and duplicate event creation.`
           );
-        } catch (queueErr) {
-          console.warn('[EmailWorker] Could not queue ES indexing:', (queueErr as Error).message);
         }
 
         return;
@@ -175,13 +218,18 @@ export class EmailWorkerService {
       return;
     }
 
-    // 2. IDEMPOTENCY CHECK: If already sent, exit safely without duplicate dispatch
+    // 2. IDEMPOTENCY CHECK: If already sent or failed, exit safely without duplicate dispatch
     if (email.status === EmailStatus.SENT) {
       console.log(`[EmailWorker] Email ${emailId} is already marked as SENT. Skipping duplicate execution.`);
       return;
     }
 
-    // 3. DISPATCH RECEIPT CHECK: If already accepted by SMTP in a prior attempt where DB commit failed,
+    if (email.status === EmailStatus.FAILED) {
+      console.log(`[EmailWorker] Email ${emailId} is already marked as FAILED. Skipping execution.`);
+      return;
+    }
+
+    // 3. DISPATCH RECEIPT CHECK (RULE B): If already accepted by SMTP in a prior attempt where DB commit failed,
     // bypass SMTP completely and directly finalize PostgreSQL state using stored receipt.
     // Also skips rate limiter check and send slot reservation to avoid consuming extra quota.
     const existingReceipt = await this.getDispatchReceipt(emailId);
@@ -193,7 +241,64 @@ export class EmailWorkerService {
       return;
     }
 
-    // 4. ATOMIC WORKER CLAIM
+    // 4. PROCESSING STATE RECOVERY / ABANDONED WORKER CHECK (RULES D, E, F)
+    if (email.status === EmailStatus.PROCESSING) {
+      const isLeaseExpired = Date.now() - new Date(email.updatedAt).getTime() >= EmailWorkerService.LEASE_TIMEOUT_MS;
+      const isRetry = job.attemptsMade > 0;
+
+      if (!isLeaseExpired && !isRetry) {
+        // Active peer worker is currently processing this job
+        console.log(`[EmailWorker] Email ${emailId} is actively being processed by another worker (lease active). Skipping.`);
+        return;
+      }
+
+      // Abandoned worker detected in PROCESSING state without dispatch receipt.
+      // Per Rule E & F: Do NOT blindly send again (cannot prove SMTP was not called).
+      // Atomically transition to FAILED with DLQ_MOVED event to prevent silent stranding.
+      const recovered = await prisma.$transaction(async (tx) => {
+        const result = await tx.email.updateMany({
+          where: {
+            id: emailId,
+            status: EmailStatus.PROCESSING,
+            attempts: email.attempts, // Optimistic concurrency lock
+          },
+          data: {
+            status: EmailStatus.FAILED,
+            error: 'Ambiguous worker crash during PROCESSING state without dispatch receipt. Moved to DLQ to prevent duplicate send.',
+          },
+        });
+
+        if (result.count !== 1) {
+          return false;
+        }
+
+        const eventClient = tx.emailEvent || prisma.emailEvent;
+        await eventClient.create({
+          data: {
+            emailId,
+            type: EventType.DLQ_MOVED,
+            message: `Ambiguous crash in PROCESSING state (Attempt ${email.attempts}). Cannot verify SMTP dispatch status; moved to DLQ.`,
+            metadata: {
+              jobId: job.id,
+              attemptsMade: job.attemptsMade,
+              lastUpdatedAt: email.updatedAt,
+              reason: 'AMBIGUOUS_PROCESSING_CRASH',
+            },
+          },
+        });
+
+        return true;
+      });
+
+      if (recovered) {
+        console.warn(
+          `[EmailWorker] Recovered abandoned email ${emailId} from PROCESSING state. Marked as FAILED (DLQ) to prevent duplicate delivery.`
+        );
+      }
+      return;
+    }
+
+    // 5. ATOMIC WORKER CLAIM (RULE C)
     // Claim the email atomically so concurrent executions cannot both send it.
     const claimed = await prisma.$transaction(async (tx) => {
       const result = await tx.email.updateMany({
@@ -213,7 +318,8 @@ export class EmailWorkerService {
         return false;
       }
 
-      await tx.emailEvent.create({
+      const eventClient = tx.emailEvent || prisma.emailEvent;
+      await eventClient.create({
         data: {
           emailId,
           type: EventType.WORKER_PICKED,
@@ -361,8 +467,97 @@ export class EmailWorkerService {
     // If this fails, the error is NOT an SMTP failure. The dispatch receipt in Redis
     // guarantees that future BullMQ retries will skip SMTP dispatch and re-attempt DB finalization.
     try {
-      await this.finalizeSentStatus(emailId, email.campaignId, authoritativeReceipt);
+      await this.finalizeSentStatus(emailId, email.campaignId, authoritativeReceipt || receipt);
     } catch (dbError) {
+      if (!authoritativeReceipt) {
+        // CATASTROPHIC DUAL FAILURE: SMTP accepted message, but Redis receipt persistence failed persistently
+        // AND PostgreSQL SENT finalization failed. Transition to FAILED/DLQ to prevent duplicate send.
+        console.error(
+          `[EmailWorker] CATASTROPHIC DUAL FAILURE: Email ${emailId} delivered to SMTP (Message-ID: ${receipt.messageId}), but BOTH Redis receipt persistence AND PostgreSQL finalization failed. Transitioning to FAILED (DLQ) to prevent duplicate send.`
+        );
+        // Atomic guard: only transition to FAILED if the row is still in PROCESSING.
+        // If finalizeSentStatus() committed SENT before its client connection was lost,
+        // the status will already be SENT here and updateMany will return count=0 — leave it alone.
+        // The $transaction itself may also fail if DB is fully unavailable; fall back to best-effort
+        // direct calls in that case so this handler never throws to the BullMQ caller.
+        try {
+          const dlqResult = await prisma.$transaction(async (tx) => {
+            const result = await tx.email.updateMany({
+              where: {
+                id: emailId,
+                status: EmailStatus.PROCESSING, // Guard: do not overwrite an already-SENT row
+              },
+              data: {
+                status: EmailStatus.FAILED,
+                messageId: receipt.messageId,
+                error: `Dual failure: SMTP delivered (${receipt.messageId}) but Redis receipt and DB finalization failed: ${(dbError as Error).message}`,
+              },
+            });
+
+            if (result.count !== 1) {
+              // Row is no longer PROCESSING — finalizeSentStatus likely committed SENT.
+              // Do NOT create DLQ_MOVED; leave the successful SENT state intact.
+              return false;
+            }
+
+            await tx.emailEvent.create({
+              data: {
+                emailId,
+                type: EventType.DLQ_MOVED,
+                message: `Dual failure: SMTP accepted (${receipt.messageId}) but receipt persistence and DB finalization failed. Moved to DLQ to prevent duplicate send.`,
+                metadata: { messageId: receipt.messageId, error: (dbError as Error).message },
+              },
+            });
+
+            return true;
+          });
+
+          if (!dlqResult) {
+            console.warn(
+              `[EmailWorker] Dual-failure handler: email ${emailId} was NOT in PROCESSING state — finalizeSentStatus likely already committed SENT. Leaving state intact.`
+            );
+          }
+        } catch (dlqTxError) {
+          // The transaction itself failed (DB completely unavailable).
+          // Best-effort: attempt non-transactional writes individually so we still record the DLQ transition.
+          console.error(
+            `[EmailWorker] Dual-failure DLQ transaction failed for ${emailId}; attempting non-transactional fallback:`,
+            (dlqTxError as Error).message
+          );
+          try {
+            const fallbackResult = await prisma.email.updateMany({
+              where: { id: emailId, status: EmailStatus.PROCESSING },
+              data: {
+                status: EmailStatus.FAILED,
+                messageId: receipt.messageId,
+                error: `Dual failure: SMTP delivered (${receipt.messageId}) but Redis receipt and DB finalization failed: ${(dbError as Error).message}`,
+              },
+            });
+            if (fallbackResult.count === 1) {
+              await prisma.emailEvent.create({
+                data: {
+                  emailId,
+                  type: EventType.DLQ_MOVED,
+                  message: `Dual failure: SMTP accepted (${receipt.messageId}) but receipt persistence and DB finalization failed. Moved to DLQ to prevent duplicate send.`,
+                  metadata: { messageId: receipt.messageId, error: (dbError as Error).message },
+                },
+              });
+            } else {
+              console.warn(
+                `[EmailWorker] Dual-failure fallback: email ${emailId} was NOT in PROCESSING state — likely already SENT. Leaving state intact.`
+              );
+            }
+          } catch (fallbackError) {
+            // DB is completely unresponsive. Log and return; BullMQ will retry the outer job.
+            console.error(
+              `[EmailWorker] Dual-failure fallback also failed for ${emailId}. Email may remain stuck in PROCESSING; manual intervention required.`,
+              (fallbackError as Error).message
+            );
+          }
+        }
+        return;
+      }
+
       console.error(
         `[EmailWorker] PostgreSQL SENT finalization failed for email ${emailId} after SMTP success. Dispatch receipt is safely preserved in Redis. Error:`,
         (dbError as Error).message
