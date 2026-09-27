@@ -86,6 +86,57 @@ export class EmailController {
   }
 
   /**
+   * Retrieves aggregated email metric counts for the dashboard
+   */
+  public static async getMetrics(req: Request, res: Response) {
+    const userId = req.user!.id;
+
+    const [scheduled, sent, rateLimited, failed] = await Promise.all([
+      prisma.email.count({
+        where: {
+          userId,
+          status: {
+            in: [
+              EmailStatus.SCHEDULED,
+              EmailStatus.QUEUED,
+              EmailStatus.PROCESSING,
+              EmailStatus.RATE_LIMITED,
+              EmailStatus.RESCHEDULED,
+            ],
+          },
+        },
+      }),
+      prisma.email.count({
+        where: {
+          userId,
+          status: EmailStatus.SENT,
+        },
+      }),
+      prisma.email.count({
+        where: {
+          userId,
+          status: {
+            in: [EmailStatus.RATE_LIMITED, EmailStatus.RESCHEDULED],
+          },
+        },
+      }),
+      prisma.email.count({
+        where: {
+          userId,
+          status: EmailStatus.FAILED,
+        },
+      }),
+    ]);
+
+    return res.json({
+      scheduled,
+      sent,
+      rateLimited,
+      failed,
+    });
+  }
+
+  /**
    * Retrieves the detailed Delivery Timeline audit trail for an email
    */
   public static async getEmailTimeline(req: Request, res: Response) {

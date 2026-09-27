@@ -153,15 +153,14 @@ export class RateLimiterService {
   }
 
   /**
-   * Enforces minimum interval between dispatch start times for a sender across concurrent workers.
+   * Atomically allocates a send slot for a sender on the Redis timeline WITHOUT sleeping.
    * Uses Redis server TIME for timeline and dynamic TTL to prevent queue expiration.
-   * Accepts an optional beforeSleep callback to perform operations (like DB logging) before sleeping.
+   * Returns scheduledTime (epoch ms) and waitMs (delay from current time).
    */
-  public async reserveSendSlot(
+  public async allocateSendSlot(
     senderId: string,
-    delayMs: number,
-    beforeSleep?: (scheduledTime: number, waitMs: number) => Promise<void> | void
-  ): Promise<number> {
+    delayMs: number
+  ): Promise<{ scheduledTime: number; waitMs: number }> {
     const redisKey = `reachflow:throttle:sender:${senderId}:next_send_time`;
 
     const result = (await redisClient.eval(
@@ -172,7 +171,22 @@ export class RateLimiterService {
     )) as [number, number] | number;
 
     const scheduledTime = Array.isArray(result) ? Number(result[0]) : Number(result);
-    const initialWaitMs = Array.isArray(result) ? Number(result[1]) : Math.max(0, scheduledTime - Date.now());
+    const waitMs = Array.isArray(result) ? Number(result[1]) : Math.max(0, scheduledTime - Date.now());
+
+    return { scheduledTime, waitMs };
+  }
+
+  /**
+   * Enforces minimum interval between dispatch start times for a sender across concurrent workers.
+   * Uses allocateSendSlot and handles in-worker sleep if requested.
+   * Accepts an optional beforeSleep callback to perform operations (like DB logging) before sleeping.
+   */
+  public async reserveSendSlot(
+    senderId: string,
+    delayMs: number,
+    beforeSleep?: (scheduledTime: number, waitMs: number) => Promise<void> | void
+  ): Promise<number> {
+    const { scheduledTime, waitMs: initialWaitMs } = await this.allocateSendSlot(senderId, delayMs);
 
     const startWaitMs = Date.now();
     if (beforeSleep) {

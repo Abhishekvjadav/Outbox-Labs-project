@@ -2,7 +2,7 @@ import { Worker, Job } from 'bullmq';
 import { EMAIL_QUEUE_NAME, EmailJobData, esIndexQueue } from '../queues/emailQueue';
 import { redisClient, redisConnectionOptions } from '../queues/redis';
 import { prisma } from '../prisma/client';
-import { rateLimiterService } from '../services/rateLimiter';
+import { rateLimiterService, RateLimiterService } from '../services/rateLimiter';
 import { etherealService, SendMailResult } from '../services/ethereal';
 import { slackService } from '../services/slack';
 import { config } from '../config/env';
@@ -585,150 +585,231 @@ export class EmailWorkerService {
         heartbeatTimer.unref();
       }
 
+    const isThrottledJob = Boolean(job.data?.isThrottled && job.data?.reservedStartMs);
+    let rateCheckWindowKey: string | undefined;
+
     // 5. ATOMIC RATE LIMIT CHECK (Redis Lua check-and-increment)
-    const effectiveHourlyLimit = Math.min(
-      email.sender?.hourlyLimit ?? config.defaultMaxEmailsPerHour,
-      email.campaign?.hourlyLimit ?? email.sender?.hourlyLimit ?? config.defaultMaxEmailsPerHour
-    );
-    const rateCheck = await rateLimiterService.checkAndIncrement(email.senderId, effectiveHourlyLimit);
-
-    if (!rateCheck.allowed) {
-      console.log(
-        `[EmailWorker] Rate limit reached for sender ${email.sender.email} (${rateCheck.currentCount}/${effectiveHourlyLimit}). Rescheduling email ${emailId}.`
+    // Waking throttled jobs bypass hourly quota check because quota was already incremented in attempt 1
+    if (!isThrottledJob) {
+      const effectiveHourlyLimit = Math.min(
+        email.sender?.hourlyLimit ?? config.defaultMaxEmailsPerHour,
+        email.campaign?.hourlyLimit ?? email.sender?.hourlyLimit ?? config.defaultMaxEmailsPerHour
       );
+      const rateCheck = await rateLimiterService.checkAndIncrement(email.senderId, effectiveHourlyLimit);
+      rateCheckWindowKey = rateCheck.windowKey;
 
-      // Trigger deduplicated Slack alert via Redis SET-NX (F4 FIX: fully non-blocking).
-      // Any Slack/Redis/DB error is caught and logged. The critical rescheduling path
-      // (PostgreSQL RESCHEDULED update + BullMQ delayed enqueue) must always execute,
-      // regardless of notification infrastructure availability.
-      Promise.resolve()
-        .then(() =>
-          slackService.sendDeduplicatedRateLimitAlert(email.userId, email.senderId, {
-            senderEmail: email.sender.email,
-            senderName: email.sender.name,
-            hourlyLimit: effectiveHourlyLimit,
-            currentCount: rateCheck.currentCount,
-            windowKey: rateCheck.windowKey,
-            nextWindowTime: new Date(rateCheck.resetTimeMs).toISOString(),
-            campaignName: email.campaign.name,
-          })
-        )
-        .catch((slackErr: unknown) => {
-          console.warn(
-            `[EmailWorker] Slack rate-limit notification failed for sender ${email.sender.email} (non-fatal, rescheduling continues):`,
-            (slackErr as Error).message
-          );
-        });
+      if (!rateCheck.allowed) {
+        console.log(
+          `[EmailWorker] Rate limit reached for sender ${email.sender.email} (${rateCheck.currentCount}/${effectiveHourlyLimit}). Rescheduling email ${emailId}.`
+        );
 
-      // Calculate exact delay to next window
-      const nowMs = Date.now();
-      const delayUntilNextWindow = Math.max(1000, rateCheck.resetTimeMs - nowMs + Math.floor(Math.random() * 2000));
-      const nextScheduledAt = new Date(nowMs + delayUntilNextWindow);
+        // Trigger deduplicated Slack alert via Redis SET-NX (F4 FIX: fully non-blocking).
+        // Any Slack/Redis/DB error is caught and logged. The critical rescheduling path
+        // (PostgreSQL RESCHEDULED update + BullMQ delayed enqueue) must always execute,
+        // regardless of notification infrastructure availability.
+        Promise.resolve()
+          .then(() =>
+            slackService.sendDeduplicatedRateLimitAlert(email.userId, email.senderId, {
+              senderEmail: email.sender.email,
+              senderName: email.sender.name,
+              hourlyLimit: effectiveHourlyLimit,
+              currentCount: rateCheck.currentCount,
+              windowKey: rateCheck.windowKey,
+              nextWindowTime: new Date(rateCheck.resetTimeMs).toISOString(),
+              campaignName: email.campaign.name,
+            })
+          )
+          .catch((slackErr: unknown) => {
+            console.warn(
+              `[EmailWorker] Slack rate-limit notification failed for sender ${email.sender.email} (non-fatal, rescheduling continues):`,
+              (slackErr as Error).message
+            );
+          });
 
-      // F5 ENQUEUE-FIRST RESCHEDULING:
-      // 1. Enqueue deterministic BullMQ delayed job in Redis BEFORE updating PostgreSQL.
-      // 2. Use bounded local retry (3 attempts, short backoff).
-      // 3. If enqueue fails after retries, throw so email is NOT marked RESCHEDULED in DB;
-      //    existing retry/recovery mechanics will safely handle the active lease / PROCESSING state.
-      // 4. Once BullMQ enqueue succeeds, update PostgreSQL status to RESCHEDULED.
-      // 5. If PostgreSQL update fails after enqueue, the delayed job safely remains in Redis;
-      //    when it fires, the worker verifies DB state before dispatching.
-      const { emailQueue } = await import('../queues/emailQueue');
-      const reschedJobId = `email-send-${email.id}-resched-${rateCheck.resetTimeMs}`;
+        // Calculate exact delay to next window
+        const nowMs = Date.now();
+        const delayUntilNextWindow = Math.max(1000, rateCheck.resetTimeMs - nowMs + Math.floor(Math.random() * 2000));
+        const nextScheduledAt = new Date(nowMs + delayUntilNextWindow);
 
-      const maxEnqueueAttempts = 3;
-      let enqueueSuccess = false;
-      let lastEnqueueError: unknown;
+        // F5 ENQUEUE-FIRST RESCHEDULING:
+        // 1. Enqueue deterministic BullMQ delayed job in Redis BEFORE updating PostgreSQL.
+        // 2. Use bounded local retry (3 attempts, short backoff).
+        // 3. If enqueue fails after retries, throw so email is NOT marked RESCHEDULED in DB;
+        //    existing retry/recovery mechanics will safely handle the active lease / PROCESSING state.
+        // 4. Once BullMQ enqueue succeeds, update PostgreSQL status to RESCHEDULED.
+        // 5. If PostgreSQL update fails after enqueue, the delayed job safely remains in Redis;
+        //    when it fires, the worker verifies DB state before dispatching.
+        const { emailQueue } = await import('../queues/emailQueue');
+        const reschedJobId = `email-send-${email.id}-resched-${rateCheck.resetTimeMs}`;
 
-      for (let attempt = 1; attempt <= maxEnqueueAttempts; attempt++) {
-        try {
-          await emailQueue.add(
-            'send-email',
-            { emailId: email.id, isRescheduled: true },
-            {
-              jobId: reschedJobId,
-              delay: delayUntilNextWindow,
+        const maxEnqueueAttempts = 3;
+        let enqueueSuccess = false;
+        let lastEnqueueError: unknown;
+
+        for (let attempt = 1; attempt <= maxEnqueueAttempts; attempt++) {
+          try {
+            await emailQueue.add(
+              'send-email',
+              { emailId: email.id, isRescheduled: true },
+              {
+                jobId: reschedJobId,
+                delay: delayUntilNextWindow,
+              }
+            );
+            enqueueSuccess = true;
+            break;
+          } catch (enqueueErr) {
+            lastEnqueueError = enqueueErr;
+            console.warn(
+              `[EmailWorker] F5 rescheduling: emailQueue.add attempt ${attempt}/${maxEnqueueAttempts} failed for email ${emailId}:`,
+              (enqueueErr as Error).message
+            );
+            if (attempt < maxEnqueueAttempts) {
+              await new Promise((resolve) => setTimeout(resolve, attempt * 100));
             }
-          );
-          enqueueSuccess = true;
-          break;
-        } catch (enqueueErr) {
-          lastEnqueueError = enqueueErr;
-          console.warn(
-            `[EmailWorker] F5 rescheduling: emailQueue.add attempt ${attempt}/${maxEnqueueAttempts} failed for email ${emailId}:`,
-            (enqueueErr as Error).message
-          );
-          if (attempt < maxEnqueueAttempts) {
-            await new Promise((resolve) => setTimeout(resolve, attempt * 100));
           }
         }
-      }
 
-      if (!enqueueSuccess) {
-        console.error(
-          `[EmailWorker] F5 rescheduling: FAILED to enqueue delayed job for email ${emailId} after ${maxEnqueueAttempts} attempts. Aborting RESCHEDULED DB update:`,
-          (lastEnqueueError as Error)?.message
-        );
-        throw lastEnqueueError;
-      }
+        if (!enqueueSuccess) {
+          console.error(
+            `[EmailWorker] F5 rescheduling: FAILED to enqueue delayed job for email ${emailId} after ${maxEnqueueAttempts} attempts. Aborting RESCHEDULED DB update:`,
+            (lastEnqueueError as Error)?.message
+          );
+          throw lastEnqueueError;
+        }
 
-      // Step 2: Only after BullMQ delayed job is securely in Redis, commit RESCHEDULED in PostgreSQL
-      await prisma.$transaction([
-        prisma.email.update({
-          where: { id: emailId },
-          data: {
-            status: EmailStatus.RESCHEDULED,
-            scheduledAt: nextScheduledAt,
-          },
-        }),
-        prisma.emailEvent.create({
-          data: {
-            emailId,
-            type: EventType.RATE_LIMIT_EXCEEDED,
-            message: `Hourly limit reached (${rateCheck.currentCount}/${effectiveHourlyLimit}). Rescheduled to next hour window.`,
-            metadata: {
-              windowKey: rateCheck.windowKey,
-              resetTimeMs: rateCheck.resetTimeMs,
-              delayUntilNextWindow,
+        // Step 2: Only after BullMQ delayed job is securely in Redis, commit RESCHEDULED in PostgreSQL
+        await prisma.$transaction([
+          prisma.email.update({
+            where: { id: emailId },
+            data: {
+              status: EmailStatus.RESCHEDULED,
+              scheduledAt: nextScheduledAt,
             },
-          },
-        }),
-      ]);
+          }),
+          prisma.emailEvent.create({
+            data: {
+              emailId,
+              type: EventType.RATE_LIMIT_EXCEEDED,
+              message: `Hourly limit reached (${rateCheck.currentCount}/${effectiveHourlyLimit}). Rescheduled to next hour window.`,
+              metadata: {
+                windowKey: rateCheck.windowKey,
+                resetTimeMs: rateCheck.resetTimeMs,
+                delayUntilNextWindow,
+              },
+            },
+          }),
+        ]);
 
-      return;
+        return;
+      }
+    } else {
+      rateCheckWindowKey = RateLimiterService.getHourlyWindowKey().windowKey;
     }
 
     // 6. PER-SENDER INTER-SEND THROTTLING: Reserve start slot across concurrent workers
-    // F2 FIX: PROVIDER_DELAY_APPLIED DB event creation occurs before the throttle sleep,
-    // so that once the wait concludes, the worker proceeds directly to SMTP with zero DB latency jitter.
-    const delayMs = email.campaign.delayMs || config.defaultMinEmailDelayMs;
-    let eventCreated = false;
-    const reservedStartMs = await rateLimiterService.reserveSendSlot(
-      email.senderId,
-      delayMs,
-      async (scheduledTime) => {
-        eventCreated = true;
-        await prisma.emailEvent.create({
-          data: {
-            emailId,
-            type: EventType.PROVIDER_DELAY_APPLIED,
-            message: `Enforced minimum inter-send interval (${delayMs}ms) for sender ${email.sender.email}`,
-            metadata: { delayMs, reservedStartMs: scheduledTime },
-          },
-        });
+    if (isThrottledJob) {
+      // Waking throttled job: slot was ALREADY reserved on the Redis timeline at job.data.reservedStartMs.
+      // Small jitter guard if BullMQ worker picked the job slightly early (< 1000ms):
+      const jitterWaitMs = Math.max(0, (job.data.reservedStartMs || 0) - Date.now());
+      if (jitterWaitMs > 0 && jitterWaitMs <= 1000) {
+        await new Promise((resolve) => setTimeout(resolve, jitterWaitMs));
       }
-    );
+    } else {
+      const delayMs = email.campaign.delayMs || config.defaultMinEmailDelayMs;
+      const { scheduledTime, waitMs } = typeof rateLimiterService.allocateSendSlot === 'function'
+        ? await rateLimiterService.allocateSendSlot(email.senderId, delayMs)
+        : { scheduledTime: await rateLimiterService.reserveSendSlot(email.senderId, delayMs), waitMs: 0 };
 
-    // Fallback if reserveSendSlot was mocked without calling beforeSleep callback
-    if (!eventCreated) {
+      // HYBRID THROTTLE POLICY:
+      // If waitMs > 1000ms: enqueue a deterministic delayed BullMQ job and mark email RESCHEDULED
+      // so the worker concurrency slot is instantly freed and F3 recovery cannot DLQ it.
+      if (waitMs > 1000) {
+        const throttleJobId = `email-send-${email.id}-throttle-${scheduledTime}`;
+        const nextScheduledAt = new Date(scheduledTime);
+
+        const { emailQueue } = await import('../queues/emailQueue');
+        const maxEnqueueAttempts = 3;
+        let enqueueSuccess = false;
+        let lastEnqueueError: unknown;
+
+        for (let attempt = 1; attempt <= maxEnqueueAttempts; attempt++) {
+          try {
+            await emailQueue.add(
+              'send-email',
+              {
+                emailId: email.id,
+                isThrottled: true,
+                reservedStartMs: scheduledTime,
+              },
+              {
+                jobId: throttleJobId,
+                delay: waitMs,
+              }
+            );
+            enqueueSuccess = true;
+            break;
+          } catch (enqueueErr) {
+            lastEnqueueError = enqueueErr;
+            console.warn(
+              `[EmailWorker] Throttle rescheduling: emailQueue.add attempt ${attempt}/${maxEnqueueAttempts} failed for email ${emailId}:`,
+              (enqueueErr as Error).message
+            );
+            if (attempt < maxEnqueueAttempts) {
+              await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+            }
+          }
+        }
+
+        if (!enqueueSuccess) {
+          console.error(
+            `[EmailWorker] Throttle rescheduling: FAILED to enqueue delayed job for email ${emailId} after ${maxEnqueueAttempts} attempts. Aborting RESCHEDULED DB update:`,
+            (lastEnqueueError as Error)?.message
+          );
+          throw lastEnqueueError;
+        }
+
+        // Atomically mark RESCHEDULED in PostgreSQL before returning so F3 recovery cannot DLQ it
+        await prisma.$transaction([
+          prisma.email.update({
+            where: { id: emailId },
+            data: {
+              status: EmailStatus.RESCHEDULED,
+              scheduledAt: nextScheduledAt,
+              jobId: throttleJobId,
+            },
+          }),
+          prisma.emailEvent.create({
+            data: {
+              emailId,
+              type: EventType.PROVIDER_DELAY_APPLIED,
+              message: `Enforced minimum inter-send interval (${delayMs}ms) for sender ${email.sender.email}. Rescheduled via BullMQ delayed queue (${waitMs}ms delay).`,
+              metadata: {
+                delayMs,
+                reservedStartMs: scheduledTime,
+                waitMs,
+                throttleJobId,
+              },
+            },
+          }),
+        ]);
+
+        return;
+      }
+
+      // Micro-wait (waitMs <= 1000ms): in-worker wait without queue overhead
       await prisma.emailEvent.create({
         data: {
           emailId,
           type: EventType.PROVIDER_DELAY_APPLIED,
           message: `Enforced minimum inter-send interval (${delayMs}ms) for sender ${email.sender.email}`,
-          metadata: { delayMs, reservedStartMs },
+          metadata: { delayMs, reservedStartMs: scheduledTime },
         },
       });
+
+      if (waitMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
     }
 
     // 7. STAGE B: SMTP DISPATCH (Isolated error boundary with F7 ambiguity protection)
@@ -810,7 +891,9 @@ export class EmailWorkerService {
       // Compensate ONLY the quota reservation made by the current attempt using the exact windowKey
       // returned by checkAndIncrement. SMTP was definitively not accepted, so this attempt must not burn quota.
       try {
-        await rateLimiterService.compensate(email.senderId, rateCheck.windowKey);
+        if (rateCheckWindowKey) {
+          await rateLimiterService.compensate(email.senderId, rateCheckWindowKey);
+        }
       } catch (compErr) {
         console.warn(
           `[EmailWorker] Failed to compensate rate-limit quota for email ${emailId}:`,

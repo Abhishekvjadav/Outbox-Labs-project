@@ -27,6 +27,7 @@ apiRouter.get('/senders', authMiddleware, CampaignController.getSenders);
 apiRouter.post('/senders', authMiddleware, CampaignController.createSender);
 
 // Emails & Search
+apiRouter.get('/emails/metrics', authMiddleware, EmailController.getMetrics);
 apiRouter.get('/emails/scheduled', authMiddleware, EmailController.getScheduledEmails);
 apiRouter.get('/emails/sent', authMiddleware, EmailController.getSentEmails);
 apiRouter.get('/emails/search', authMiddleware, EmailController.search);

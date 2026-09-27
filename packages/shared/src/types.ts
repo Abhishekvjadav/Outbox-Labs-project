@@ -141,3 +141,10 @@ export interface CampaignEstimatorResult {
   estimatedDurationMinutes: number;
   estimatedDurationHuman: string;
 }
+
+export interface EmailMetricsDTO {
+  scheduled: number;
+  sent: number;
+  rateLimited: number;
+  failed: number;
+}

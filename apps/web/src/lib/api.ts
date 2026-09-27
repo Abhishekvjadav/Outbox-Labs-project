@@ -3,6 +3,7 @@ import {
   CampaignCreateInput,
   EmailDTO,
   EmailEventDTO,
+  EmailMetricsDTO,
   SenderDTO,
   SystemHealthDTO,
   UserDTO,
@@ -59,6 +60,10 @@ export const apiClient = {
   },
 
   // Emails
+  getEmailMetrics: async (): Promise<EmailMetricsDTO> => {
+    const res = await api.get('/emails/metrics');
+    return res.data;
+  },
   getScheduledEmails: async (page = 1, limit = 20): Promise<{ emails: EmailDTO[]; total: number; totalPages: number }> => {
     const res = await api.get(`/emails/scheduled?page=${page}&limit=${limit}`);
     return res.data;

@@ -9,6 +9,8 @@ export interface EmailJobData {
   isRescheduled?: boolean;
   isRecovery?: boolean;
   recoveryGeneration?: number;
+  isThrottled?: boolean;
+  reservedStartMs?: number;
 }
 
 export interface EsIndexJobData {
