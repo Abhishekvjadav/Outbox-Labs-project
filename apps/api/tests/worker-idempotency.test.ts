@@ -124,5 +124,14 @@ describe('Email worker idempotency', () => {
     // Winner claims (1) + winner finalizes (1); concurrent worker detects active lease in PROCESSING and skips safely
     expect(prisma.email.updateMany).toHaveBeenCalledTimes(2);
     expect(etherealService.sendEmail).toHaveBeenCalledTimes(1);
+
+    // F3 recovery check: concurrent worker schedules recovery with a valid finite delay (never NaN)
+    const { emailQueue } = await import('../src/queues/emailQueue');
+    const recoveryCall = (emailQueue.add as jest.Mock).mock.calls.find(
+      (call: any[]) => call[1]?.isRecovery
+    );
+    expect(recoveryCall).toBeDefined();
+    expect(Number.isFinite(recoveryCall[2]?.delay)).toBe(true);
+    expect(Number.isNaN(recoveryCall[2]?.delay)).toBe(false);
   });
 });

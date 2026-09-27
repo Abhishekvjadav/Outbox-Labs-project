@@ -82,9 +82,11 @@ jest.mock('../src/services/slack', () => ({
 
 import { EmailStatus, EventType } from '@reachflow/shared';
 import { Job } from 'bullmq';
-import { EmailJobData } from '../src/queues/emailQueue';
+import { EmailJobData, emailQueue } from '../src/queues/emailQueue';
 import { prisma } from '../src/prisma/client';
 import { etherealService } from '../src/services/ethereal';
+import { slackService } from '../src/services/slack';
+import { rateLimiterService } from '../src/services/rateLimiter';
 import { EmailWorkerService, DispatchReceipt } from '../src/workers/emailWorker';
 
 describe('Post-SMTP / Database Failure Safety', () => {
@@ -711,7 +713,7 @@ describe('Post-SMTP / Database Failure Safety', () => {
       await (worker as any).processEmailJob(emailId, job);
 
       expect(emailStatus).toBe(EmailStatus.FAILED);
-      expect(emailError).toContain('Ambiguous worker crash');
+      expect(emailError).toContain('Expired lease');
       expect(dlqEventCreated).toBe(true);
       expect(etherealService.sendEmail).not.toHaveBeenCalled();
       expect(prisma.campaign.update).not.toHaveBeenCalled();
@@ -943,6 +945,312 @@ describe('Post-SMTP / Database Failure Safety', () => {
       expect(prisma.email.updateMany).not.toHaveBeenCalled();
       expect(etherealService.sendEmail).not.toHaveBeenCalled();
       expect(prisma.emailEvent.create).not.toHaveBeenCalled();
+    });
+  }); // end describe('Step 5 — Safe PROCESSING Recovery & Crash Handling')
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 7A — F3: Lease-only PROCESSING Recovery & F4: Slack Non-Blocking
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('Step 7A — F3 & F4 Fixes', () => {
+    // Shared helpers
+    const ACTIVE_LEASE_UPDATED_AT = new Date(); // fresh — lease not expired
+    const EXPIRED_LEASE_UPDATED_AT = new Date(
+      Date.now() - (EmailWorkerService.LEASE_TIMEOUT_MS + 30_000)
+    );
+
+    const makeRateLimitedEmail = (emailId: string) => ({
+      ...createMockEmail(emailId, EmailStatus.SCHEDULED),
+    });
+
+    const makeStandardTxClient = () => ({
+      email: { updateMany: prisma.email.updateMany, update: prisma.email.update },
+      campaign: { update: prisma.campaign.update },
+      emailEvent: { create: prisma.emailEvent.create },
+    });
+
+    // ── F3 TESTS ──────────────────────────────────────────────────────────
+
+    /**
+     * F3-T1: PROCESSING + active lease + attemptsMade > 0
+     *   → email is protected, no SMTP, no FAILED transition
+     */
+    it('F3: PROCESSING + active lease + attemptsMade > 0 → remains protected, no SMTP, no FAILED', async () => {
+      const emailId = 'f3-active-lease-with-retry';
+      const email = {
+        ...createMockEmail(emailId, EmailStatus.PROCESSING),
+        attempts: 2,
+        updatedAt: ACTIVE_LEASE_UPDATED_AT,
+      };
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+
+      const job = createMockJob(emailId, 2); // attemptsMade=2, lease still active
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Lease is active → must skip entirely without any DB write or SMTP
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+      expect(prisma.email.updateMany).not.toHaveBeenCalled();
+      expect(prisma.emailEvent.create).not.toHaveBeenCalled();
+    });
+
+    /**
+     * F3-T2: PROCESSING + expired lease + attemptsMade = 0
+     *   → conservative FAILED/DLQ recovery, no SMTP
+     */
+    it('F3: PROCESSING + expired lease + attemptsMade = 0 → FAILED/DLQ recovery, no SMTP', async () => {
+      const emailId = 'f3-expired-lease-first-attempt';
+      const email = {
+        ...createMockEmail(emailId, EmailStatus.PROCESSING),
+        attempts: 1,
+        updatedAt: EXPIRED_LEASE_UPDATED_AT,
+      };
+
+      let emailStatus = EmailStatus.PROCESSING;
+      let dlqEventCreated = false;
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+        if (where.status === EmailStatus.PROCESSING && where.attempts === email.attempts) {
+          emailStatus = data.status;
+          return { count: 1 };
+        }
+        return { count: 0 };
+      });
+      (prisma.emailEvent.create as jest.Mock).mockImplementation(async ({ data }) => {
+        if (data.type === EventType.DLQ_MOVED) dlqEventCreated = true;
+        return {};
+      });
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) =>
+        typeof arg === 'function' ? arg(makeStandardTxClient()) : Promise.all(arg)
+      );
+
+      const job = createMockJob(emailId, 0); // attemptsMade=0, lease expired
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      expect(emailStatus).toBe(EmailStatus.FAILED);
+      expect(dlqEventCreated).toBe(true);
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+    });
+
+    /**
+     * F3-T3: PROCESSING + expired lease + attemptsMade > 0
+     *   → same conservative recovery, no SMTP
+     */
+    it('F3: PROCESSING + expired lease + attemptsMade > 0 → FAILED/DLQ recovery, no SMTP', async () => {
+      const emailId = 'f3-expired-lease-retry-attempt';
+      const email = {
+        ...createMockEmail(emailId, EmailStatus.PROCESSING),
+        attempts: 3,
+        updatedAt: EXPIRED_LEASE_UPDATED_AT,
+      };
+
+      let emailStatus = EmailStatus.PROCESSING;
+      let dlqEventCreated = false;
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+      (prisma.email.updateMany as jest.Mock).mockImplementation(async ({ where, data }) => {
+        if (where.status === EmailStatus.PROCESSING && where.attempts === email.attempts) {
+          emailStatus = data.status;
+          return { count: 1 };
+        }
+        return { count: 0 };
+      });
+      (prisma.emailEvent.create as jest.Mock).mockImplementation(async ({ data }) => {
+        if (data.type === EventType.DLQ_MOVED) dlqEventCreated = true;
+        return {};
+      });
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) =>
+        typeof arg === 'function' ? arg(makeStandardTxClient()) : Promise.all(arg)
+      );
+
+      const job = createMockJob(emailId, 5); // high attemptsMade, expired lease
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      expect(emailStatus).toBe(EmailStatus.FAILED);
+      expect(dlqEventCreated).toBe(true);
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+    });
+
+    /**
+     * F3-T4: Transient infrastructure failure causes retry; PROCESSING + active lease
+     *   → retry does NOT cause DLQ; email stays protected
+     *
+     * Simulates: rate-limit Redis call fails → BullMQ retries with attemptsMade=1
+     * while the PROCESSING lease is still fresh. Must not DLQ.
+     */
+    it('F3: retry caused by transient infra failure with active PROCESSING lease → protected, no DLQ', async () => {
+      const emailId = 'f3-infra-retry-active-lease';
+      const email = {
+        ...createMockEmail(emailId, EmailStatus.PROCESSING),
+        attempts: 1,
+        updatedAt: ACTIVE_LEASE_UPDATED_AT, // still fresh
+      };
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+
+      // No dispatch receipt in Redis
+      const job = createMockJob(emailId, 1); // BullMQ retry attempt, but lease still alive
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Lease active → must not DLQ, must not call SMTP
+      expect(prisma.email.updateMany).not.toHaveBeenCalled();
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+      expect(prisma.emailEvent.create).not.toHaveBeenCalled();
+    });
+
+    // ── F4 TESTS ──────────────────────────────────────────────────────────
+
+    // Common setup for F4 rate-limit tests
+    const setupRateLimitedJob = (emailId: string, slackMockImpl?: () => Promise<void>) => {
+      const email = makeRateLimitedEmail(emailId);
+      const resetTimeMs = Date.now() + 3_600_000;
+      const windowKey = 'window-key-test';
+
+      (prisma.email.findUnique as jest.Mock).mockResolvedValue({ ...email });
+      (prisma.$transaction as jest.Mock).mockImplementation(async (arg) =>
+        typeof arg === 'function' ? arg(makeStandardTxClient()) : Promise.all(arg)
+      );
+
+      // Claim succeeds
+      (prisma.email.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      (prisma.email.update as jest.Mock).mockResolvedValue({});
+      (prisma.emailEvent.create as jest.Mock).mockResolvedValue({});
+      (prisma.campaign.update as jest.Mock).mockResolvedValue({});
+
+      // Rate limit: deny
+      (rateLimiterService.checkAndIncrement as jest.Mock).mockResolvedValue({
+        allowed: false,
+        currentCount: 100,
+        windowKey,
+        resetTimeMs,
+      });
+
+      // Slack mock
+      (slackService.sendDeduplicatedRateLimitAlert as jest.Mock).mockImplementation(
+        slackMockImpl ?? (() => Promise.resolve())
+      );
+
+      const job = createMockJob(emailId, 0);
+      return { email, job, resetTimeMs, windowKey };
+    };
+
+    /**
+     * F4-T1: Slack Redis/DB lookup failure
+     *   → rate-limited email still becomes RESCHEDULED, BullMQ job still created
+     */
+    it('F4: Slack Redis lookup failure → email still becomes RESCHEDULED, BullMQ job still created', async () => {
+      const emailId = 'f4-slack-redis-fail';
+      const { job, resetTimeMs } = setupRateLimitedJob(emailId, async () => {
+        throw new Error('Redis ECONNREFUSED');
+      });
+
+      let rescheduledStatusSet = false;
+      (prisma.email.update as jest.Mock).mockImplementation(async ({ data }) => {
+        if (data.status === EmailStatus.RESCHEDULED) rescheduledStatusSet = true;
+        return {};
+      });
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Give fire-and-forget Slack a tick to settle
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Critical path must have executed
+      expect(prisma.$transaction).toHaveBeenCalled();
+      expect(emailQueue.add).toHaveBeenCalledWith(
+        'send-email',
+        { emailId, isRescheduled: true },
+        expect.objectContaining({ jobId: `email-send-${emailId}-resched-${resetTimeMs}` })
+      );
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+
+      // Slack was attempted (non-fatal)
+      expect(slackService.sendDeduplicatedRateLimitAlert).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * F4-T2: Slack API failure (e.g. HTTP 503)
+     *   → rate-limited email still becomes RESCHEDULED, BullMQ job still created
+     */
+    it('F4: Slack API failure → email still becomes RESCHEDULED, BullMQ job still created', async () => {
+      const emailId = 'f4-slack-api-fail';
+      const { job, resetTimeMs } = setupRateLimitedJob(emailId, async () => {
+        throw new Error('Slack API returned 503 Service Unavailable');
+      });
+
+      (prisma.email.update as jest.Mock).mockResolvedValue({});
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Give fire-and-forget a tick
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(prisma.$transaction).toHaveBeenCalled();
+      expect(emailQueue.add).toHaveBeenCalledWith(
+        'send-email',
+        { emailId, isRescheduled: true },
+        expect.objectContaining({ jobId: `email-send-${emailId}-resched-${resetTimeMs}` })
+      );
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+      expect(slackService.sendDeduplicatedRateLimitAlert).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * F4-T3: Slack notification succeeds
+     *   → existing SET-NX deduplication behavior intact, RESCHEDULED, BullMQ job created
+     */
+    it('F4: Slack notification succeeds → RESCHEDULED + BullMQ job created, deduplication intact', async () => {
+      const emailId = 'f4-slack-succeeds';
+      let slackCallCount = 0;
+      const { job, resetTimeMs } = setupRateLimitedJob(emailId, async () => {
+        slackCallCount++;
+      });
+
+      (prisma.email.update as jest.Mock).mockResolvedValue({});
+
+      await (worker as any).processEmailJob(emailId, job);
+
+      // Give fire-and-forget a tick
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(prisma.$transaction).toHaveBeenCalled();
+      expect(emailQueue.add).toHaveBeenCalledWith(
+        'send-email',
+        { emailId, isRescheduled: true },
+        expect.objectContaining({ jobId: `email-send-${emailId}-resched-${resetTimeMs}` })
+      );
+      expect(etherealService.sendEmail).not.toHaveBeenCalled();
+      expect(slackCallCount).toBe(1); // called exactly once (deduplication delegate stays in slackService)
+    });
+
+    /**
+     * F4-T4: Verify no duplicate executable BullMQ job is created
+     *   (deterministic jobId deduplication preserved under F4 changes)
+     */
+    it('F4: deterministic BullMQ jobId prevents duplicate executable jobs under Slack failure', async () => {
+      const emailId = 'f4-no-duplicate-job';
+      const { job, resetTimeMs } = setupRateLimitedJob(emailId, async () => {
+        throw new Error('Slack timeout');
+      });
+
+      (prisma.email.update as jest.Mock).mockResolvedValue({});
+
+      await (worker as any).processEmailJob(emailId, job);
+      await new Promise((r) => setTimeout(r, 50));
+
+      // emailQueue.add must be called exactly once with the deterministic jobId
+      expect(emailQueue.add).toHaveBeenCalledTimes(1);
+      expect(emailQueue.add).toHaveBeenCalledWith(
+        'send-email',
+        { emailId, isRescheduled: true },
+        expect.objectContaining({
+          jobId: `email-send-${emailId}-resched-${resetTimeMs}`,
+        })
+      );
     });
   });
 });

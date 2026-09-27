@@ -21,12 +21,31 @@ else
 end
 `;
 
+// Lua script for atomic rate limit quota compensation (decrement with floor of 0)
+// Restores quota when an SMTP delivery attempt fails before acceptance
+const COMPENSATE_QUOTA_LUA = `
+local key = KEYS[1]
+local current = tonumber(redis.call('get', key) or "0")
+if current > 0 then
+    local new_val = redis.call('decr', key)
+    if new_val < 0 then
+        redis.call('set', key, "0")
+        return 0
+    end
+    return new_val
+else
+    return 0
+end
+`;
+
 // Lua script for per-sender serialized inter-send start interval
 // Guarantees minimum interval between SMTP dispatch start times per sender across concurrent workers
 const RESERVE_SENDER_INTERVAL_LUA = `
 local key = KEYS[1]
-local now = tonumber(ARGV[1])
-local delay = tonumber(ARGV[2])
+local delay = tonumber(ARGV[2] or ARGV[1])
+
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 
 local current_allowed = tonumber(redis.call('get', key) or "0")
 local scheduled_time = current_allowed
@@ -35,9 +54,15 @@ if scheduled_time < now then
 end
 
 local next_time = scheduled_time + delay
-redis.call('set', key, next_time, 'EX', math.ceil(delay * 10 / 1000) + 60)
+local ttl = math.max(60, math.ceil((next_time - now) / 1000) + 60)
+redis.call('set', key, next_time, 'EX', ttl)
 
-return scheduled_time
+local wait_ms = scheduled_time - now
+if wait_ms < 0 then
+    wait_ms = 0
+end
+
+return {scheduled_time, wait_ms}
 `;
 
 export interface RateLimitCheckResult {
@@ -105,23 +130,59 @@ export class RateLimiterService {
   }
 
   /**
-   * Enforces minimum interval between dispatch start times for a sender across concurrent workers
+   * Atomically compensates/decrements rate limit quota for a sender in a specific window.
+   * Restores quota when an SMTP delivery attempt fails before acceptance.
+   * Clamped at a floor of 0.
    */
-  public async reserveSendSlot(senderId: string, delayMs: number): Promise<number> {
-    const nowMs = Date.now();
+  public async compensate(senderId: string, windowKey: string): Promise<number> {
+    const redisKey = `reachflow:ratelimit:sender:${senderId}:window:${windowKey}`;
+    try {
+      const result = (await redisClient.eval(
+        COMPENSATE_QUOTA_LUA,
+        1,
+        redisKey
+      )) as number;
+      return typeof result === 'number' ? result : 0;
+    } catch (err) {
+      console.warn(
+        `[RateLimiterService] Failed to compensate quota for sender ${senderId} in window ${windowKey}:`,
+        (err as Error).message
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * Enforces minimum interval between dispatch start times for a sender across concurrent workers.
+   * Uses Redis server TIME for timeline and dynamic TTL to prevent queue expiration.
+   * Accepts an optional beforeSleep callback to perform operations (like DB logging) before sleeping.
+   */
+  public async reserveSendSlot(
+    senderId: string,
+    delayMs: number,
+    beforeSleep?: (scheduledTime: number, waitMs: number) => Promise<void> | void
+  ): Promise<number> {
     const redisKey = `reachflow:throttle:sender:${senderId}:next_send_time`;
 
-    const scheduledTime = (await redisClient.eval(
+    const result = (await redisClient.eval(
       RESERVE_SENDER_INTERVAL_LUA,
       1,
       redisKey,
-      nowMs.toString(),
       delayMs.toString()
-    )) as number;
+    )) as [number, number] | number;
 
-    const waitMs = scheduledTime - nowMs;
-    if (waitMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    const scheduledTime = Array.isArray(result) ? Number(result[0]) : Number(result);
+    const initialWaitMs = Array.isArray(result) ? Number(result[1]) : Math.max(0, scheduledTime - Date.now());
+
+    const startWaitMs = Date.now();
+    if (beforeSleep) {
+      await beforeSleep(scheduledTime, initialWaitMs);
+    }
+    const elapsedInCallback = Date.now() - startWaitMs;
+    const remainingWaitMs = Math.max(0, initialWaitMs - elapsedInCallback);
+
+    if (remainingWaitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, remainingWaitMs));
     }
 
     return scheduledTime;

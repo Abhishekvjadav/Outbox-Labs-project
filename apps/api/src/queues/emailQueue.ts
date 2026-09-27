@@ -7,6 +7,8 @@ export const ES_INDEX_QUEUE_NAME = 'reachflow-es-index-queue';
 export interface EmailJobData {
   emailId: string;
   isRescheduled?: boolean;
+  isRecovery?: boolean;
+  recoveryGeneration?: number;
 }
 
 export interface EsIndexJobData {

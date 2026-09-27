@@ -9,6 +9,8 @@ export interface SendMailOptions {
   subject: string;
   text?: string;
   html?: string;
+  messageId?: string;
+  onTransmissionStart?: () => void;
 }
 
 export interface SendMailResult {
@@ -64,12 +66,16 @@ export class EtherealService {
   public async sendEmail(options: SendMailOptions): Promise<SendMailResult> {
     const transporter = this.getTransporter(options.etherealUser, options.etherealPass);
 
+    options.onTransmissionStart?.();
+
     const info = await transporter.sendMail({
       from: `"${options.fromName}" <${options.fromEmail}>`,
       to: options.to,
       subject: options.subject,
       text: options.text || options.subject,
       html: options.html || `<p>${options.text || options.subject}</p>`,
+      messageId: options.messageId,
+      headers: options.messageId ? { 'Message-ID': options.messageId } : undefined,
     });
 
     const previewUrl = nodemailer.getTestMessageUrl(info);
