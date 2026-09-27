@@ -1,5 +1,6 @@
+process.env.ETHEREAL_CACHE = 'false';
+
 import { prisma } from './client';
-import { etherealService } from '../services/ethereal';
 
 async function seed() {
   console.log('[Seed] Starting database seed...');
@@ -17,10 +18,12 @@ async function seed() {
 
   console.log(`[Seed] User ready: ${user.name} (${user.email})`);
 
-  // 2. Provision two Ethereal sender accounts
+  // 2. Provision Ethereal test senders if none exist
   const senderCount = await prisma.sender.count({ where: { userId: user.id } });
-  if (senderCount < 2) {
+  if (senderCount === 0) {
     console.log('[Seed] Provisioning Ethereal test senders...');
+
+    const { etherealService } = await import('../services/ethereal');
 
     const account1 = await etherealService.createTestSender();
     const sender1 = await prisma.sender.create({
@@ -46,7 +49,11 @@ async function seed() {
       },
     });
 
-    console.log(`[Seed] Senders created:\n  - ${sender1.name} (${sender1.email})\n  - ${sender2.name} (${sender2.email})`);
+    console.log(
+      `[Seed] Senders created:\n  - ${sender1.name} (${sender1.email})\n  - ${sender2.name} (${sender2.email})`
+    );
+  } else {
+    console.log(`[Seed] Senders already exist (${senderCount} found). Skipping sender creation.`);
   }
 
   console.log('[Seed] Database seeding completed successfully.');

@@ -58,7 +58,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   // If in development or demo mode and no valid token, check if default demo user exists
-  if (config.nodeEnv !== 'production') {
+  if (config.demoMode) {
     let demoUser = await prisma.user.findFirst();
     if (!demoUser) {
       demoUser = await prisma.user.create({

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { SenderDTO, parseAndValidateLeads, calculateCampaignEstimate, CsvValidationResult } from '@reachflow/shared';
 import { apiClient } from '../../lib/api';
 import { X, UploadCloud, Clock, AlertCircle, CheckCircle, Flame, Sparkles } from 'lucide-react';
@@ -24,6 +24,12 @@ export const ComposeModal: React.FC<ComposeModalProps> = ({
   const [selectedSenderIds, setSelectedSenderIds] = useState<string[]>(
     senders.length > 0 ? [senders[0].id] : []
   );
+
+  useEffect(() => {
+    if (senders.length > 0 && selectedSenderIds.length === 0) {
+      setSelectedSenderIds([senders[0].id]);
+    }
+  }, [senders, selectedSenderIds]);
 
   // CSV Lead pre-flight state
   const [csvResult, setCsvResult] = useState<CsvValidationResult | null>(null);
