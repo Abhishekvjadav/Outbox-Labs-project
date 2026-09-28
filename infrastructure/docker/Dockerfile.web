@@ -6,7 +6,7 @@ COPY package*.json ./
 COPY packages/shared/package*.json ./packages/shared/
 COPY frontend/package*.json ./frontend/
 
-RUN npm install
+RUN npm install && npm install --no-save @rollup/rollup-linux-x64-musl@4.63.5
 
 COPY packages/shared ./packages/shared
 RUN npm run build --workspace=@reachflow/shared

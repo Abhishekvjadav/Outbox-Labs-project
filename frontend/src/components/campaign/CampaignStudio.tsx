@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   SenderDTO, 
   parseAndValidateLeads, 
@@ -7,17 +7,31 @@ import {
 } from '@reachflow/shared';
 import { apiClient } from '../../lib/api';
 import { 
-  UploadCloud, 
-  AlertCircle, 
-  CheckCircle, 
-  Sparkles, 
-  Mail, 
-  Send, 
   ArrowLeft, 
-  ShieldCheck, 
-  Gauge, 
-  Check
+  Paperclip, 
+  Clock, 
+  Send, 
+  UploadCloud, 
+  Sparkles, 
+  CheckCircle, 
+  AlertCircle, 
+  X, 
+  Bold, 
+  Italic, 
+  Underline, 
+  Strikethrough, 
+  List, 
+  ListOrdered, 
+  AlignLeft, 
+  AlignCenter, 
+  AlignRight, 
+  Quote, 
+  Code, 
+  Undo, 
+  Redo, 
+  FileText
 } from 'lucide-react';
+import { format, addDays, setHours, setMinutes, addHours } from 'date-fns';
 
 interface CampaignStudioProps {
   senders: SenderDTO[];
@@ -25,41 +39,104 @@ interface CampaignStudioProps {
   onCancel: () => void;
 }
 
+interface AttachmentItem {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+}
+
 export const CampaignStudio: React.FC<CampaignStudioProps> = ({
   senders,
   onCampaignCreated,
   onCancel,
 }) => {
+  // Campaign Basics
   const [name, setName] = useState('Outreach Sequence');
   const [subject, setSubject] = useState('Exclusive opportunity for your engineering team');
   const [body, setBody] = useState(
-    'Hi there,\n\nWe noticed your team is building high-scale distributed systems. ReachFlow automates intelligent mailbox throttling and rate-limit recovery.\n\nBest,\nReachFlow Team'
+    'Hi there,\n\nWe noticed your team is building high-scale distributed systems. ReachFlow automates intelligent mailbox throttling and rate-limit recovery.\n\nBest regards,\nReachFlow Team'
   );
   const [selectedSenderIds, setSelectedSenderIds] = useState<string[]>(
-    senders.length > 0 ? senders.map((s) => s.id) : []
+    senders.length > 0 ? [senders[0].id] : []
   );
 
   useEffect(() => {
     if (senders.length > 0 && selectedSenderIds.length === 0) {
-      setSelectedSenderIds(senders.map((s) => s.id));
+      setSelectedSenderIds([senders[0].id]);
     }
   }, [senders, selectedSenderIds.length]);
 
-  // Lead pre-flight state
+  // Lead State & Recipient Chips
+  const [recipientInput, setRecipientInput] = useState('');
+  const [recipientChips, setRecipientChips] = useState<string[]>([
+    'sarah.connor@cyberdyne.net',
+    'alex.miller@apexflow.com',
+  ]);
   const [csvResult, setCsvResult] = useState<CsvValidationResult | null>(null);
-  const [rawText, setRawText] = useState('');
 
-  // Schedule parameters
-  const [startTime, setStartTime] = useState(() => {
-    const d = new Date(Date.now() + 30000); // Default now + 30s
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  });
-  const [delayMs, setDelayMs] = useState(2000);
-  const [hourlyLimit, setHourlyLimit] = useState(50);
+  // Parse initial chips
+  useEffect(() => {
+    const parsed = parseAndValidateLeads(recipientChips);
+    setCsvResult(parsed);
+  }, [recipientChips]);
+
+  // Scheduling Parameters
+  const [scheduleDate, setScheduleDate] = useState<Date>(() => new Date(Date.now() + 30000));
+  const [delaySeconds, setDelaySeconds] = useState(2);
+  const [hourlyLimit, setHourlyLimit] = useState(100);
+
+  // Send Later Popover State
+  const [isSendLaterOpen, setIsSendLaterOpen] = useState(false);
+  const sendLaterRef = useRef<HTMLDivElement>(null);
+
+  // Attachments State
+  const [attachments, setAttachments] = useState<AttachmentItem[]>([
+    { id: '1', name: 'reachflow-specs.pdf', size: 245000, type: 'application/pdf' },
+  ]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Form Processing State
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load demo leads for quick evaluator testing
+  // Click outside to close Send Later Popover
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sendLaterRef.current && !sendLaterRef.current.contains(e.target as Node)) {
+        setIsSendLaterOpen(false);
+      }
+    };
+    if (isSendLaterOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isSendLaterOpen]);
+
+  // Handle Add Recipient Chip via Enter or comma
+  const handleKeyDownRecipient = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' || e.key === ',' || e.key === ' ') {
+      e.preventDefault();
+      addRecipientFromInput();
+    } else if (e.key === 'Backspace' && recipientInput === '' && recipientChips.length > 0) {
+      setRecipientChips(recipientChips.slice(0, -1));
+    }
+  };
+
+  const addRecipientFromInput = () => {
+    const val = recipientInput.trim().replace(/,$/, '');
+    if (val && !recipientChips.includes(val)) {
+      const updated = [...recipientChips, val];
+      setRecipientChips(updated);
+      setRecipientInput('');
+    }
+  };
+
+  const removeRecipientChip = (chipToRemove: string) => {
+    setRecipientChips(recipientChips.filter((c) => c !== chipToRemove));
+  };
+
+  // Load 10 Demo Leads
   const handleLoadDemoLeads = () => {
     const demoLeads = [
       'john.doe@techscale.io',
@@ -73,11 +150,10 @@ export const CampaignStudio: React.FC<CampaignStudioProps> = ({
       'john.doe@techscale.io', // Intentional duplicate
       'invalid-email-format',    // Intentional invalid
     ];
-    const parsed = parseAndValidateLeads(demoLeads);
-    setCsvResult(parsed);
-    setRawText(demoLeads.join('\n'));
+    setRecipientChips(demoLeads);
   };
 
+  // Handle CSV / Text Upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -85,53 +161,77 @@ export const CampaignStudio: React.FC<CampaignStudioProps> = ({
     const reader = new FileReader();
     reader.onload = (event) => {
       const content = event.target?.result as string;
-      setRawText(content);
-      const lines = content.split(/[\r\n,;]+/);
-      const parsed = parseAndValidateLeads(lines);
-      setCsvResult(parsed);
+      const lines = content.split(/[\r\n,;]+/).map((s) => s.trim()).filter(Boolean);
+      const combined = Array.from(new Set([...recipientChips, ...lines]));
+      setRecipientChips(combined);
     };
     reader.readAsText(file);
+    if (e.target) e.target.value = '';
   };
 
-  const handleTextChange = (text: string) => {
-    setRawText(text);
-    const lines = text.split(/[\r\n,;]+/);
-    const parsed = parseAndValidateLeads(lines);
-    setCsvResult(parsed);
+  // Handle Attachment Upload
+  const handleAttachmentUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const newAttachments: AttachmentItem[] = Array.from(files).map((f) => ({
+      id: Math.random().toString(36).substring(2, 9),
+      name: f.name,
+      size: f.size,
+      type: f.type,
+    }));
+
+    setAttachments([...attachments, ...newAttachments]);
+    if (e.target) e.target.value = '';
   };
 
-  const toggleSender = (senderId: string) => {
-    if (selectedSenderIds.includes(senderId)) {
-      if (selectedSenderIds.length > 1) {
-        setSelectedSenderIds(selectedSenderIds.filter((id) => id !== senderId));
-      }
-    } else {
-      setSelectedSenderIds([...selectedSenderIds, senderId]);
+  const removeAttachment = (id: string) => {
+    setAttachments(attachments.filter((a) => a.id !== id));
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  // Quick Scheduling Presets
+  const handlePresetSchedule = (type: 'tomorrow-10' | 'tomorrow-11' | 'tomorrow-15' | 'plus-1h') => {
+    const now = new Date();
+    let target = new Date();
+    if (type === 'tomorrow-10') {
+      target = setMinutes(setHours(addDays(now, 1), 10), 0);
+    } else if (type === 'tomorrow-11') {
+      target = setMinutes(setHours(addDays(now, 1), 11), 0);
+    } else if (type === 'tomorrow-15') {
+      target = setMinutes(setHours(addDays(now, 1), 15), 0);
+    } else if (type === 'plus-1h') {
+      target = addHours(now, 1);
     }
+    setScheduleDate(target);
   };
 
-  const toggleAllSenders = () => {
-    if (selectedSenderIds.length === senders.length) {
-      if (senders.length > 0) setSelectedSenderIds([senders[0].id]);
-    } else {
-      setSelectedSenderIds(senders.map((s) => s.id));
-    }
-  };
-
-  // Dynamic campaign completion estimator
+  // Calculate campaign completion estimate
   const estimate = useMemo(() => {
     const validCount = csvResult?.valid || 0;
-    return calculateCampaignEstimate(validCount, selectedSenderIds.length, hourlyLimit, delayMs);
-  }, [csvResult?.valid, selectedSenderIds.length, hourlyLimit, delayMs]);
+    return calculateCampaignEstimate(
+      validCount,
+      Math.max(1, selectedSenderIds.length),
+      hourlyLimit,
+      delaySeconds * 1000
+    );
+  }, [csvResult?.valid, selectedSenderIds.length, hourlyLimit, delaySeconds]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Handle Campaign Submit
+  const handleSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+
     if (!csvResult || csvResult.valid === 0) {
-      setError('Please upload or enter at least one valid lead email address.');
+      setError('Please add or upload at least one valid recipient email address.');
       return;
     }
     if (selectedSenderIds.length === 0) {
-      setError('Please select at least one sender mailbox.');
+      setError('Please select a sender mailbox.');
       return;
     }
 
@@ -146,8 +246,8 @@ export const CampaignStudio: React.FC<CampaignStudioProps> = ({
         body,
         senderIds: selectedSenderIds,
         leads: validLeads,
-        startTime: new Date(startTime),
-        delayMs,
+        startTime: scheduleDate,
+        delayMs: delaySeconds * 1000,
         hourlyLimit,
       });
 
@@ -159,409 +259,548 @@ export const CampaignStudio: React.FC<CampaignStudioProps> = ({
     }
   };
 
-  const combinedHourlyCapacity = useMemo(() => {
-    return senders
-      .filter((s) => selectedSenderIds.includes(s.id))
-      .reduce((acc, s) => acc + Math.min(s.hourlyLimit, hourlyLimit), 0);
-  }, [senders, selectedSenderIds, hourlyLimit]);
+  const isScheduleInFuture = scheduleDate.getTime() > Date.now() + 60000;
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6 animate-in fade-in duration-200">
-      {/* Studio Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-white/[0.08]">
-        <div>
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={onCancel}
-              className="text-xs font-medium text-slate-400 hover:text-white transition-colors flex items-center gap-1 mr-2"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back</span>
-            </button>
-            <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-              <span>Campaign Studio</span>
-            </h1>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-brand-500/15 text-brand-400 border border-brand-500/25">
-              Two-Column Planner
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Configure campaign parameters, validate recipient lists, and audit pre-flight delivery capacity.
-          </p>
+    <div className="max-w-5xl mx-auto bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden font-sans">
+      {/* 1. Top Compose Bar */}
+      <div className="px-6 py-3.5 border-b border-slate-200 flex items-center justify-between bg-white">
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={onCancel}
+            className="p-1 rounded-md text-slate-400 hover:text-slate-800 hover:bg-slate-100 transition"
+            title="Cancel & Back"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <span className="text-sm font-semibold text-slate-900 tracking-tight">
+            Compose New Email
+          </span>
         </div>
 
-        <div className="flex items-center gap-2">
+        {/* Action Controls */}
+        <div className="flex items-center space-x-2.5 relative">
+          {/* Attachment Icon Button */}
           <button
             type="button"
-            onClick={onCancel}
-            className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white bg-surface-card hover:bg-surface-50 border border-white/[0.08] transition-colors"
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach files"
+            className="p-2 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 border border-slate-200 transition"
           >
-            Cancel
+            <Paperclip className="w-4 h-4" />
           </button>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleAttachmentUpload}
+            multiple
+            className="hidden"
+          />
+
+          {/* Schedule / Clock Button */}
+          <div className="relative" ref={sendLaterRef}>
+            <button
+              type="button"
+              onClick={() => setIsSendLaterOpen(!isSendLaterOpen)}
+              title="Schedule Send Time"
+              className={`p-2 rounded-lg border transition flex items-center space-x-1.5 ${
+                isScheduleInFuture
+                  ? 'bg-amber-50 text-amber-800 border-amber-300'
+                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100 border-slate-200'
+              }`}
+            >
+              <Clock className="w-4 h-4" />
+              {isScheduleInFuture && (
+                <span className="text-[11px] font-medium font-mono hidden sm:inline">
+                  {format(scheduleDate, 'MMM dd, h:mm a')}
+                </span>
+              )}
+            </button>
+
+            {/* Send Later Popover */}
+            {isSendLaterOpen && (
+              <div className="absolute right-0 top-full mt-2 w-72 bg-white rounded-xl border border-slate-200 shadow-popover p-4 z-50 space-y-3 font-sans animate-in fade-in zoom-in-95 duration-150">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                  <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Send Later</span>
+                  </span>
+                  <button
+                    onClick={() => setIsSendLaterOpen(false)}
+                    className="text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Quick Presets */}
+                <div className="space-y-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Quick Options
+                  </span>
+                  <div className="grid grid-cols-1 gap-1 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handlePresetSchedule('tomorrow-10')}
+                      className="text-left px-2.5 py-1.5 rounded-lg text-xs text-slate-700 hover:bg-slate-50 hover:text-emerald-700 border border-transparent hover:border-slate-200 transition flex items-center justify-between"
+                    >
+                      <span>Tomorrow, 10:00 AM</span>
+                      <span className="text-[10px] text-slate-400 font-mono">Default</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handlePresetSchedule('tomorrow-11')}
+                      className="text-left px-2.5 py-1.5 rounded-lg text-xs text-slate-700 hover:bg-slate-50 hover:text-emerald-700 border border-transparent hover:border-slate-200 transition"
+                    >
+                      Tomorrow, 11:00 AM
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handlePresetSchedule('tomorrow-15')}
+                      className="text-left px-2.5 py-1.5 rounded-lg text-xs text-slate-700 hover:bg-slate-50 hover:text-emerald-700 border border-transparent hover:border-slate-200 transition"
+                    >
+                      Tomorrow, 3:00 PM
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handlePresetSchedule('plus-1h')}
+                      className="text-left px-2.5 py-1.5 rounded-lg text-xs text-slate-700 hover:bg-slate-50 hover:text-emerald-700 border border-transparent hover:border-slate-200 transition"
+                    >
+                      In 1 Hour
+                    </button>
+                  </div>
+                </div>
+
+                {/* Custom Date & Time Picker */}
+                <div className="pt-2 border-t border-slate-100">
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                    Pick date & time
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={format(scheduleDate, "yyyy-MM-dd'T'HH:mm")}
+                    onChange={(e) => {
+                      if (e.target.value) setScheduleDate(new Date(e.target.value));
+                    }}
+                    className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-800 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                {/* Popover Buttons */}
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-end space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScheduleDate(new Date(Date.now() + 30000));
+                      setIsSendLaterOpen(false);
+                    }}
+                    className="px-2.5 py-1 rounded-md text-xs text-slate-500 hover:bg-slate-100"
+                  >
+                    Send Now
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsSendLaterOpen(false)}
+                    className="px-3 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-2xs"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Primary Green Action Button: Send / Send Later */}
           <button
             type="button"
-            onClick={handleSubmit}
+            onClick={() => handleSubmit()}
             disabled={loading || !csvResult || csvResult.valid === 0}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_4px_rgba(0,0,0,0.3)] border border-brand-400/30 transition-all active:scale-[0.98]"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-xs transition active:scale-[0.99]"
           >
             {loading ? (
               <>
                 <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
                 <span>Scheduling...</span>
               </>
+            ) : isScheduleInFuture ? (
+              <>
+                <Clock className="w-3.5 h-3.5" />
+                <span>Send Later</span>
+              </>
             ) : (
               <>
                 <Send className="w-3.5 h-3.5" />
-                <span>Launch Campaign</span>
+                <span>Send</span>
               </>
             )}
           </button>
         </div>
       </div>
 
+      {/* Error Alert */}
       {error && (
-        <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center space-x-2.5">
+        <div className="mx-6 mt-4 p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center space-x-2">
           <AlertCircle className="w-4 h-4 flex-shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
-      {/* Two-Column Studio Layout */}
-      <form onSubmit={handleSubmit} className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* LEFT COLUMN: Campaign Content, Recipients & Schedule (7 cols) */}
-        <div className="lg:col-span-7 space-y-5">
-          {/* Section 1: Campaign Identity */}
-          <div className="p-5 rounded-xl bg-surface-card border border-white/[0.08] shadow-sm space-y-4">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-brand-400" />
-              <span>1. Campaign Details</span>
-            </h2>
+      {/* 2. Horizontal Email Fields */}
+      <div className="divide-y divide-slate-100 text-xs">
+        {/* From Field */}
+        <div className="px-6 py-3 flex items-center">
+          <label className="w-20 text-slate-400 font-medium select-none">From</label>
+          <div className="flex-1 flex items-center space-x-2">
+            <select
+              value={selectedSenderIds[0] || ''}
+              onChange={(e) => setSelectedSenderIds([e.target.value])}
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 hover:border-slate-300 rounded-lg text-xs text-slate-900 font-medium focus:outline-none focus:border-emerald-500 transition max-w-sm"
+            >
+              {senders.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} &lt;{s.email}&gt; ({s.hourlyLimit}/hr quota)
+                </option>
+              ))}
+            </select>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Campaign Name
-              </label>
-              <input
-                type="text"
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-surface-overlay border border-white/[0.08] focus:border-brand-500/50 rounded-lg text-sm text-white focus:outline-none transition-colors"
-                placeholder="e.g. Q4 Growth & Enterprise Outreach"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Subject Line
-              </label>
-              <input
-                type="text"
-                required
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-surface-overlay border border-white/[0.08] focus:border-brand-500/50 rounded-lg text-sm text-white focus:outline-none transition-colors"
-                placeholder="e.g. Scalable cold email delivery for your team"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Message Body
-              </label>
-              <textarea
-                rows={5}
-                required
-                value={body}
-                onChange={(e) => setBody(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-surface-overlay border border-white/[0.08] focus:border-brand-500/50 rounded-lg text-sm text-white focus:outline-none transition-colors font-sans resize-y leading-relaxed"
-                placeholder="Write your email content..."
-              />
-            </div>
+            <span className="text-[11px] text-slate-400 font-mono hidden md:inline">
+              Quota: {senders.find((s) => s.id === selectedSenderIds[0])?.hourlyLimit || 100} / hr
+            </span>
           </div>
+        </div>
 
-          {/* Section 2: Recipients / CSV Upload */}
-          <div className="p-5 rounded-xl bg-surface-card border border-white/[0.08] shadow-sm space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-brand-400" />
-                <span>2. Recipients & Leads</span>
-              </h2>
+        {/* To Field (Chips + Upload List CTA + Demo Leads) */}
+        <div className="px-6 py-3 flex flex-col sm:flex-row sm:items-start gap-2">
+          <label className="w-20 text-slate-400 font-medium select-none pt-1.5">To</label>
+          <div className="flex-1">
+            <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-slate-50/70 border border-slate-200 rounded-lg focus-within:border-emerald-500 focus-within:bg-white transition min-h-[38px]">
+              {recipientChips.map((chip, idx) => {
+                const isValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(chip);
+                return (
+                  <span
+                    key={idx}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono border ${
+                      isValid
+                        ? 'bg-white text-slate-800 border-slate-200 shadow-2xs'
+                        : 'bg-rose-50 text-rose-700 border-rose-200'
+                    }`}
+                  >
+                    <span>{chip}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeRecipientChip(chip)}
+                      className="text-slate-400 hover:text-slate-700"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                );
+              })}
 
-              <button
-                type="button"
-                onClick={handleLoadDemoLeads}
-                className="text-[11px] font-semibold text-brand-400 hover:text-brand-300 bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/25 px-2.5 py-1 rounded-md transition flex items-center space-x-1.5"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Load Demo Leads (10 leads)</span>
-              </button>
+              <input
+                type="email"
+                value={recipientInput}
+                onChange={(e) => setRecipientInput(e.target.value)}
+                onKeyDown={handleKeyDownRecipient}
+                onBlur={addRecipientFromInput}
+                placeholder={recipientChips.length === 0 ? 'recipient@example.com (press Enter or comma)' : 'Add more...'}
+                className="flex-1 min-w-[160px] bg-transparent text-xs text-slate-900 placeholder-slate-400 focus:outline-none px-1"
+              />
             </div>
 
-            {/* Upload Area / Direct Input */}
-            <div className="space-y-3">
-              <label className="flex flex-col items-center justify-center p-4 border border-dashed border-white/[0.12] hover:border-brand-500/50 rounded-xl cursor-pointer bg-surface-overlay/30 hover:bg-surface-overlay/60 transition-colors group">
-                <UploadCloud className="w-6 h-6 text-slate-400 group-hover:text-brand-400 transition-colors" />
-                <span className="text-xs font-medium text-slate-300 mt-1.5">Upload CSV with lead emails</span>
-                <span className="text-[10px] text-slate-400 font-mono">Accepts .csv or comma/newline separated</span>
-                <input type="file" accept=".csv,.txt" onChange={handleFileUpload} className="hidden" />
-              </label>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1">
-                  Or Paste Email Addresses
+            {/* Recipient Action Bar & Validation Summary */}
+            <div className="flex flex-wrap items-center justify-between gap-2 mt-2">
+              <div className="flex items-center space-x-2">
+                <label className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold border border-slate-200 transition">
+                  <UploadCloud className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Upload List (CSV/TXT)</span>
+                  <input type="file" accept=".csv,.txt" onChange={handleFileUpload} className="hidden" />
                 </label>
-                <textarea
-                  rows={3}
-                  value={rawText}
-                  onChange={(e) => handleTextChange(e.target.value)}
-                  placeholder="alex@tech.io&#10;sarah@startup.com&#10;david@outboxlabs.dev"
-                  className="w-full px-3 py-2 bg-surface-overlay border border-white/[0.08] focus:border-brand-500/50 rounded-lg text-xs font-mono text-white focus:outline-none transition-colors"
-                />
+
+                <button
+                  type="button"
+                  onClick={handleLoadDemoLeads}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-[11px] font-semibold border border-emerald-200 transition"
+                >
+                  <Sparkles className="w-3 h-3 text-emerald-600" />
+                  <span>Load Demo Leads (10)</span>
+                </button>
               </div>
 
-              {/* Pre-flight Lead Validation Card */}
+              {/* Pre-flight Lead Badges */}
               {csvResult && (
-                <div className="p-3 rounded-lg bg-surface-overlay/80 border border-white/[0.08] flex items-center justify-between text-xs">
-                  <div className="flex items-center space-x-3">
-                    <span className="text-emerald-400 flex items-center space-x-1 font-semibold">
-                      <CheckCircle className="w-3.5 h-3.5" />
-                      <span>{csvResult.valid} valid leads</span>
+                <div className="flex items-center gap-2 text-[11px]">
+                  <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                    <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>{csvResult.valid} valid leads</span>
+                  </span>
+                  {csvResult.duplicates > 0 && (
+                    <span className="text-amber-700 font-mono">
+                      ({csvResult.duplicates} dupes merged)
                     </span>
-                    {csvResult.duplicates > 0 && (
-                      <span className="text-amber-400 font-mono text-[11px]">
-                        ({csvResult.duplicates} duplicates deduplicated)
-                      </span>
-                    )}
-                    {csvResult.invalid > 0 && (
-                      <span className="text-rose-400 font-mono text-[11px]">
-                        ({csvResult.invalid} invalid formats dropped)
-                      </span>
-                    )}
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400">Pre-flight Clean</span>
+                  )}
+                  {csvResult.invalid > 0 && (
+                    <span className="text-rose-600 font-mono">
+                      ({csvResult.invalid} dropped)
+                    </span>
+                  )}
                 </div>
               )}
             </div>
           </div>
-
-          {/* Section 3: Scheduling & Dispatch Pacing */}
-          <div className="p-5 rounded-xl bg-surface-card border border-white/[0.08] shadow-sm space-y-4">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-brand-400" />
-              <span>3. Dispatch Pacing & Timeline</span>
-            </h2>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Start Schedule
-                </label>
-                <input
-                  type="datetime-local"
-                  required
-                  value={startTime}
-                  onChange={(e) => setStartTime(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface-overlay border border-white/[0.08] focus:border-brand-500/50 rounded-lg text-xs font-mono text-white focus:outline-none transition-colors"
-                />
-                <p className="text-[10px] text-slate-400 mt-1">When the first email starts dispatching</p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Min Inter-Send Delay (ms)
-                </label>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="number"
-                    min="1000"
-                    step="500"
-                    required
-                    value={delayMs}
-                    onChange={(e) => setDelayMs(Math.max(1000, parseInt(e.target.value) || 2000))}
-                    className="w-full px-3 py-2 bg-surface-overlay border border-white/[0.08] focus:border-brand-500/50 rounded-lg text-xs font-mono text-white focus:outline-none transition-colors"
-                  />
-                  <span className="text-xs text-slate-400 font-mono flex-shrink-0">ms/sender</span>
-                </div>
-                <p className="text-[10px] text-slate-400 mt-1">Guarantees safe provider throttle spacing</p>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Hourly Limit per Mailbox
-              </label>
-              <input
-                type="number"
-                min="5"
-                max="200"
-                required
-                value={hourlyLimit}
-                onChange={(e) => setHourlyLimit(Math.max(1, parseInt(e.target.value) || 50))}
-                className="w-full px-3 py-2 bg-surface-overlay border border-white/[0.08] focus:border-brand-500/50 rounded-lg text-xs font-mono text-white focus:outline-none transition-colors"
-              />
-              <p className="text-[10px] text-slate-400 mt-1">Max dispatches per hour per individual mailbox</p>
-            </div>
-          </div>
         </div>
 
-        {/* RIGHT COLUMN: Mailbox Fleet & Pre-Flight Delivery Telemetry (5 cols) */}
-        <div className="lg:col-span-5 space-y-5 sticky top-6">
-          {/* Mailbox Fleet Selector */}
-          <div className="p-5 rounded-xl bg-surface-card border border-white/[0.08] shadow-sm space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                  <Mail className="w-3.5 h-3.5 text-brand-400" />
-                  <span>Mailbox Fleet</span>
-                </h2>
-                <p className="text-[11px] text-slate-400 mt-0.5">
-                  {selectedSenderIds.length} of {senders.length} mailboxes selected
-                </p>
-              </div>
+        {/* Subject Field */}
+        <div className="px-6 py-3 flex items-center">
+          <label className="w-20 text-slate-400 font-medium select-none">Subject</label>
+          <input
+            type="text"
+            required
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder="Subject line..."
+            className="flex-1 px-2 py-1 bg-transparent text-sm text-slate-900 font-semibold focus:outline-none placeholder-slate-400"
+          />
+        </div>
 
-              <button
-                type="button"
-                onClick={toggleAllSenders}
-                className="text-[11px] font-medium text-brand-400 hover:text-brand-300 transition-colors"
-              >
-                {selectedSenderIds.length === senders.length ? 'Deselect All' : 'Select All'}
-              </button>
+        {/* Campaign Pacing Controls (Compact Row) */}
+        <div className="px-6 py-3 bg-slate-50/50 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            {/* Delay control */}
+            <div className="flex items-center space-x-2">
+              <span className="text-slate-500 font-medium">Delay between 2 emails</span>
+              <div className="flex items-center space-x-1">
+                <input
+                  type="number"
+                  min="1"
+                  max="60"
+                  value={delaySeconds}
+                  onChange={(e) => setDelaySeconds(Math.max(1, parseInt(e.target.value) || 2))}
+                  className="w-14 px-2 py-1 bg-white border border-slate-200 rounded-md text-xs font-mono font-semibold text-slate-800 text-center focus:outline-none focus:border-emerald-500 shadow-2xs"
+                />
+                <span className="text-slate-400 font-mono text-[11px]">sec</span>
+              </div>
             </div>
 
-            <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-              {senders.map((sender) => {
-                const isSelected = selectedSenderIds.includes(sender.id);
-                return (
-                  <div
-                    key={sender.id}
-                    onClick={() => toggleSender(sender.id)}
-                    className={`p-3 rounded-lg border transition-all cursor-pointer flex items-center justify-between text-xs ${
-                      isSelected
-                        ? 'bg-surface-overlay border-brand-500/40 shadow-sm'
-                        : 'bg-surface-overlay/40 border-white/[0.04] opacity-60 hover:opacity-100'
-                    }`}
-                  >
-                    <div className="min-w-0 pr-2">
-                      <div className="flex items-center space-x-2">
-                        <div
-                          className={`w-4 h-4 rounded flex items-center justify-center border transition-colors ${
-                            isSelected
-                              ? 'bg-brand-600 border-brand-500 text-white'
-                              : 'border-white/20 bg-surface-overlay'
-                          }`}
-                        >
-                          {isSelected && <Check className="w-3 h-3" />}
-                        </div>
-                        <span className="font-semibold text-slate-200 truncate">{sender.name}</span>
-                      </div>
-                      <p className="text-[10px] font-mono text-slate-400 truncate pl-6">{sender.email}</p>
-                    </div>
+            {/* Hourly Limit control */}
+            <div className="flex items-center space-x-2">
+              <span className="text-slate-500 font-medium">Hourly Limit</span>
+              <div className="flex items-center space-x-1">
+                <input
+                  type="number"
+                  min="5"
+                  max="200"
+                  value={hourlyLimit}
+                  onChange={(e) => setHourlyLimit(Math.max(1, parseInt(e.target.value) || 100))}
+                  className="w-16 px-2 py-1 bg-white border border-slate-200 rounded-md text-xs font-mono font-semibold text-slate-800 text-center focus:outline-none focus:border-emerald-500 shadow-2xs"
+                />
+                <span className="text-slate-400 font-mono text-[11px]">/hr</span>
+              </div>
+            </div>
 
-                    <div className="text-right flex-shrink-0">
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/[0.06] text-slate-300 border border-white/[0.08]">
-                        {sender.hourlyLimit}/hr
-                      </span>
+            {/* Campaign Name */}
+            <div className="flex items-center space-x-2">
+              <span className="text-slate-500 font-medium">Campaign</span>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Sequence name"
+                className="w-36 px-2 py-1 bg-white border border-slate-200 rounded-md text-xs text-slate-800 focus:outline-none focus:border-emerald-500 shadow-2xs"
+              />
+            </div>
+          </div>
+
+          {/* Delivery Estimation Summary */}
+          <div className="text-[11px] text-slate-500 font-mono flex items-center space-x-2">
+            <span>Est. duration:</span>
+            <strong className="text-slate-800 font-semibold">{estimate.estimatedDurationHuman}</strong>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. Rich-Text Email Editor */}
+      <div className="p-6 space-y-3">
+        {/* Editor Toolbar */}
+        <div className="p-1.5 bg-slate-50 border border-slate-200 rounded-lg flex flex-wrap items-center gap-1 text-slate-600">
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Undo"
+          >
+            <Undo className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Redo"
+          >
+            <Redo className="w-3.5 h-3.5" />
+          </button>
+
+          <span className="w-px h-4 bg-slate-200 mx-1" />
+
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Bold"
+          >
+            <Bold className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Italic"
+          >
+            <Italic className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Underline"
+          >
+            <Underline className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Strikethrough"
+          >
+            <Strikethrough className="w-3.5 h-3.5" />
+          </button>
+
+          <span className="w-px h-4 bg-slate-200 mx-1" />
+
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Bullet List"
+          >
+            <List className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Numbered List"
+          >
+            <ListOrdered className="w-3.5 h-3.5" />
+          </button>
+
+          <span className="w-px h-4 bg-slate-200 mx-1" />
+
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Align Left"
+          >
+            <AlignLeft className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Align Center"
+          >
+            <AlignCenter className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Align Right"
+          >
+            <AlignRight className="w-3.5 h-3.5" />
+          </button>
+
+          <span className="w-px h-4 bg-slate-200 mx-1" />
+
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Quote"
+          >
+            <Quote className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            className="p-1 rounded hover:bg-white hover:text-slate-900 transition"
+            title="Code Block"
+          >
+            <Code className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Textarea Workspace */}
+        <textarea
+          rows={10}
+          required
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder="Type Your Reply..."
+          className="w-full p-4 bg-white border border-slate-200 rounded-lg text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:border-emerald-500 transition resize-y leading-relaxed font-sans shadow-2xs min-h-[220px]"
+        />
+
+        {/* 4. Uploaded Attachments Display */}
+        {attachments.length > 0 && (
+          <div className="pt-2">
+            <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-2">
+              Attached Files ({attachments.length})
+            </span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+              {attachments.map((file) => (
+                <div
+                  key={file.id}
+                  className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between text-xs group"
+                >
+                  <div className="flex items-center space-x-2.5 min-w-0 pr-2">
+                    <FileText className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <p className="font-medium text-slate-800 truncate">{file.name}</p>
+                      <p className="text-[10px] text-slate-400 font-mono">{formatFileSize(file.size)}</p>
                     </div>
                   </div>
-                );
-              })}
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(file.id)}
+                    className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
+                    title="Remove attachment"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
             </div>
           </div>
+        )}
+      </div>
 
-          {/* Pre-Flight Delivery Telemetry Card */}
-          <div className="p-5 rounded-xl bg-surface-card border border-white/[0.08] shadow-sm space-y-4">
-            <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
-              <div className="flex items-center space-x-2">
-                <Gauge className="w-4 h-4 text-emerald-400" />
-                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                  Pre-Flight Telemetry
-                </h2>
-              </div>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                Deterministic
-              </span>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div className="flex items-center justify-between py-1 border-b border-white/[0.04]">
-                <span className="text-slate-400">Total Valid Leads</span>
-                <span className="font-mono font-bold text-white tabular-nums">
-                  {csvResult?.valid || 0}
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between py-1 border-b border-white/[0.04]">
-                <span className="text-slate-400">Selected Mailbox Fleet</span>
-                <span className="font-mono font-semibold text-slate-200">
-                  {selectedSenderIds.length} mailboxes
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between py-1 border-b border-white/[0.04]">
-                <span className="text-slate-400">Fleet Hourly Capacity</span>
-                <span className="font-mono font-semibold text-emerald-400">
-                  {combinedHourlyCapacity} emails / hr
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between py-1 border-b border-white/[0.04]">
-                <span className="text-slate-400">Inter-Send Throttle Delay</span>
-                <span className="font-mono text-slate-300">
-                  {delayMs}ms ({delayMs / 1000}s)
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between py-1 border-b border-white/[0.04]">
-                <span className="text-slate-400">Estimated Duration</span>
-                <span className="font-mono font-bold text-brand-300">
-                  {estimate.estimatedDurationHuman}
-                </span>
-              </div>
-
-              <div className="p-3 rounded-lg bg-surface-overlay/80 border border-white/[0.06] space-y-1">
-                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 block">
-                  Limiting Bottleneck
-                </span>
-                <span className="text-xs font-medium text-slate-200 block">
-                  {estimate.bottleneck === 'INTER_SEND_THROTTLE'
-                    ? `Paced by Inter-Send Delay (${delayMs}ms)`
-                    : 'Paced by Hourly Mailbox Quota'}
-                </span>
-                <p className="text-[10px] text-slate-400">
-                  Round-robin dispatch distributes ~{Math.ceil((csvResult?.valid || 0) / Math.max(1, selectedSenderIds.length))} leads per sender.
-                </p>
-              </div>
-            </div>
-
-            {/* Launch CTA */}
-            <div className="pt-2">
-              <button
-                type="submit"
-                disabled={loading || !csvResult || csvResult.valid === 0}
-                className="w-full flex items-center justify-center space-x-2 px-4 py-3 rounded-xl text-xs font-semibold text-white bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_4px_rgba(0,0,0,0.3)] border border-brand-400/30 transition-all active:scale-[0.98]"
-              >
-                {loading ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Scheduling Delayed Batches...</span>
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-4 h-4" />
-                    <span>Schedule & Enqueue Campaign</span>
-                  </>
-                )}
-              </button>
-            </div>
-
-            <div className="flex items-center justify-center space-x-1.5 text-[10px] text-slate-400 text-center pt-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span>BullMQ persistent queue • Atomic Redis reservation • Zero dropped</span>
-            </div>
-          </div>
+      {/* 5. Bottom Status Bar */}
+      <div className="px-6 py-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
+        <div className="flex items-center space-x-3">
+          <span className="flex items-center gap-1.5">
+            <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+            <span>BullMQ Delayed Queue Schedule</span>
+          </span>
+          <span className="text-slate-300">|</span>
+          <span>Zero Cron Jobs</span>
         </div>
-      </form>
+
+        <div className="flex items-center space-x-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-200 transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSubmit()}
+            disabled={loading || !csvResult || csvResult.valid === 0}
+            className="px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition shadow-2xs"
+          >
+            {loading ? 'Scheduling...' : isScheduleInFuture ? 'Schedule Email' : 'Send Immediately'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };

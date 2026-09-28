@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { EmailDTO, EmailStatus } from '@reachflow/shared';
-import { Search, Clock, ListFilter, Eye, XCircle, Send, ShieldAlert, Cpu } from 'lucide-react';
-import { format } from 'date-fns';
+import { Search, Clock, Eye, XCircle, Send, ShieldAlert, Cpu } from 'lucide-react';
+import { format, isToday, isTomorrow } from 'date-fns';
 
 interface ScheduledTableProps {
   emails: EmailDTO[];
@@ -11,6 +11,7 @@ interface ScheduledTableProps {
   onSearch: (q: string) => void;
   total: number;
   onOpenCompose?: () => void;
+  onSelectEmail?: (email: EmailDTO) => void;
 }
 
 export const ScheduledTable: React.FC<ScheduledTableProps> = ({
@@ -21,6 +22,7 @@ export const ScheduledTable: React.FC<ScheduledTableProps> = ({
   onSearch,
   total,
   onOpenCompose,
+  onSelectEmail,
 }) => {
   const [searchInput, setSearchInput] = useState('');
 
@@ -30,55 +32,55 @@ export const ScheduledTable: React.FC<ScheduledTableProps> = ({
     onSearch(val);
   };
 
+  const formatScheduleBadge = (dateStr: string) => {
+    try {
+      const d = new Date(dateStr);
+      if (isToday(d)) {
+        return `Today ${format(d, 'h:mm a')}`;
+      }
+      if (isTomorrow(d)) {
+        return `Tomorrow ${format(d, 'h:mm a')}`;
+      }
+      return format(d, 'MMM dd, h:mm a');
+    } catch (e) {
+      return dateStr;
+    }
+  };
+
   const renderStatusBadge = (email: EmailDTO) => {
     switch (email.status) {
       case EmailStatus.SCHEDULED:
         return (
-          <div className="inline-flex flex-col">
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-mono font-medium bg-sky-500/10 text-sky-400 border border-sky-500/20">
-              <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-              <span>SCHEDULED</span>
-            </span>
-            <span className="text-[10px] text-slate-400 font-mono mt-0.5">BullMQ Delayed ZSET</span>
-          </div>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200">
+            <Clock className="w-3 h-3 text-amber-500" />
+            <span>Scheduled</span>
+          </span>
         );
       case EmailStatus.QUEUED:
         return (
-          <div className="inline-flex flex-col">
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-mono font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-              <span>READY_IN_QUEUE</span>
-            </span>
-            <span className="text-[10px] text-slate-400 font-mono mt-0.5">Awaiting Worker Pick</span>
-          </div>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-sky-50 text-sky-700 border border-sky-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse" />
+            <span>In Queue</span>
+          </span>
         );
       case EmailStatus.PROCESSING:
         return (
-          <div className="inline-flex flex-col">
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-mono font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              <Cpu className="w-3 h-3 text-amber-400 animate-spin" />
-              <span>PROCESSING</span>
-            </span>
-            <span className="text-[10px] text-amber-400/80 font-mono mt-0.5">Active Worker Lease</span>
-          </div>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+            <Cpu className="w-3 h-3 text-emerald-600 animate-spin" />
+            <span>Sending</span>
+          </span>
         );
       case EmailStatus.RATE_LIMITED:
       case EmailStatus.RESCHEDULED:
         return (
-          <div className="inline-flex flex-col">
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-mono font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-              <ShieldAlert className="w-3 h-3 text-indigo-400" />
-              <span>RATE_LIMITED</span>
-            </span>
-            <span className="text-[10px] text-indigo-300 font-mono mt-0.5 flex items-center gap-1">
-              <Clock className="w-2.5 h-2.5" />
-              <span>Rollover: {format(new Date(email.scheduledAt), 'HH:mm:ss')}</span>
-            </span>
-          </div>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200">
+            <ShieldAlert className="w-3 h-3 text-indigo-500" />
+            <span>Rate Limited</span>
+          </span>
         );
       default:
         return (
-          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-mono bg-surface-50 text-slate-400 border border-white/[0.06]">
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-600">
             {email.status}
           </span>
         );
@@ -86,187 +88,124 @@ export const ScheduledTable: React.FC<ScheduledTableProps> = ({
   };
 
   return (
-    <div className="space-y-3">
-      {/* Control Bar: Filter, Total Telemetry & Query indicator */}
+    <div className="space-y-3 font-sans">
+      {/* Top Search / Filter Row */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        <div className="relative flex-1 sm:max-w-xs">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+        <div className="relative flex-1 sm:max-w-md">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={searchInput}
             onChange={handleSearchChange}
-            placeholder="Filter by recipient, subject, or domain..."
-            className="w-full pl-8 pr-3 py-1.5 bg-surface-card border border-white/[0.08] hover:border-white/[0.15] focus:border-brand-500 rounded-lg text-xs text-white placeholder-slate-400 focus:outline-none transition font-mono shadow-inset-subtle"
+            placeholder="Search scheduled emails by recipient or subject..."
+            className="w-full pl-9 pr-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 focus:border-emerald-500 rounded-lg text-xs text-slate-800 placeholder-slate-400 focus:outline-none transition shadow-2xs"
           />
         </div>
 
-        <div className="flex items-center gap-3 text-xs font-mono text-slate-400 self-end sm:self-auto">
-          <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-md bg-surface-card border border-white/[0.06]">
-            <ListFilter className="w-3 h-3 text-brand-400" />
-            <span className="text-[11px]">ACTIVE QUEUE:</span>
-            <span className="font-semibold text-white tabular-nums">{total}</span>
-          </div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span className="font-mono bg-white border border-slate-200 px-2 py-1 rounded-md text-[11px]">
+            Total Scheduled: <strong className="text-slate-800 font-semibold">{total}</strong>
+          </span>
         </div>
       </div>
 
-      {/* High-Density Data Grid Card */}
-      <div className="bg-surface-card border border-white/[0.08] rounded-xl overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-surface-overlay/80 border-b border-white/[0.06] text-[11px] text-slate-400 font-mono uppercase tracking-wider">
-              <tr>
-                <th className="px-3.5 py-2.5">Recipient & Entity</th>
-                <th className="px-3.5 py-2.5">Subject & Campaign</th>
-                <th className="px-3.5 py-2.5">Assigned Mailbox</th>
-                <th className="px-3.5 py-2.5">Scheduled Dispatch</th>
-                <th className="px-3.5 py-2.5">Engine Subsystem State</th>
-                <th className="px-3.5 py-2.5 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/[0.04]">
-              {loading ? (
-                Array.from({ length: 4 }).map((_, i) => (
-                  <tr key={i} className="animate-pulse">
-                    <td className="px-3.5 py-3">
-                      <div className="h-3.5 bg-surface-50 rounded w-36 mb-1" />
-                      <div className="h-2.5 bg-surface-50/60 rounded w-20" />
-                    </td>
-                    <td className="px-3.5 py-3">
-                      <div className="h-3.5 bg-surface-50 rounded w-48" />
-                    </td>
-                    <td className="px-3.5 py-3">
-                      <div className="h-3.5 bg-surface-50 rounded w-32" />
-                    </td>
-                    <td className="px-3.5 py-3">
-                      <div className="h-3.5 bg-surface-50 rounded w-28" />
-                    </td>
-                    <td className="px-3.5 py-3">
-                      <div className="h-3.5 bg-surface-50 rounded w-24" />
-                    </td>
-                    <td className="px-3.5 py-3 text-right">
-                      <div className="h-6 bg-surface-50 rounded w-16 ml-auto" />
-                    </td>
-                  </tr>
-                ))
-              ) : emails.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="text-center py-16 px-4">
-                    <div className="flex flex-col items-center justify-center max-w-sm mx-auto space-y-3">
-                      <div className="w-10 h-10 rounded-xl bg-surface-overlay border border-white/[0.08] flex items-center justify-center text-slate-400 shadow-inset-subtle">
-                        <Clock className="w-5 h-5 text-slate-400" />
-                      </div>
-                      <div>
-                        <h4 className="text-xs font-semibold text-slate-200">No Pending Dispatches in BullMQ</h4>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                          All outbound emails have completed or no campaigns are currently queued.
-                        </p>
-                      </div>
-                      {onOpenCompose && (
-                        <button
-                          onClick={onOpenCompose}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-overlay hover:bg-surface-50 text-slate-200 border border-white/[0.08] hover:border-white/[0.15] text-xs font-medium transition shadow-inset-subtle"
-                        >
-                          <Send className="w-3.5 h-3.5 text-brand-400" />
-                          <span>Compose Outbound Campaign</span>
-                        </button>
-                      )}
+      {/* Clean Email List (Modern Email Client Style) */}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+        {loading ? (
+          <div className="divide-y divide-slate-100">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="p-4 flex items-center justify-between animate-pulse">
+                <div className="space-y-2 flex-1 max-w-xl">
+                  <div className="h-3.5 bg-slate-100 rounded w-48" />
+                  <div className="h-3 bg-slate-100 rounded w-80" />
+                </div>
+                <div className="h-6 bg-slate-100 rounded w-24" />
+              </div>
+            ))}
+          </div>
+        ) : emails.length === 0 ? (
+          <div className="text-center py-16 px-4">
+            <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 mx-auto mb-3">
+              <Clock className="w-6 h-6 text-slate-400" />
+            </div>
+            <h3 className="text-sm font-semibold text-slate-800">No scheduled emails</h3>
+            <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+              Your scheduled queue is empty. Use the Compose button to create and schedule a campaign sequence.
+            </p>
+            {onOpenCompose && (
+              <button
+                onClick={onOpenCompose}
+                className="mt-4 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition shadow-2xs"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>Compose Email</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {emails.map((email) => {
+              const scheduleBadge = formatScheduleBadge(email.scheduledAt);
+              const previewText = email.body
+                ? email.body.replace(/\n+/g, ' ').slice(0, 100)
+                : 'No message preview...';
+
+              return (
+                <div
+                  key={email.id}
+                  onClick={() => onSelectEmail ? onSelectEmail(email) : onViewTimeline(email)}
+                  className="group px-4 py-3 hover:bg-slate-50/80 transition-colors cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                >
+                  {/* Left Column: Recipient & Subject & Snippet */}
+                  <div className="min-w-0 flex-1 pr-4">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className="font-semibold text-slate-900 text-xs">
+                        To: {email.recipient}
+                      </span>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200/80 font-mono">
+                        {scheduleBadge}
+                      </span>
                     </div>
-                  </td>
-                </tr>
-              ) : (
-                emails.map((email) => {
-                  const [username, domain] = email.recipient.split('@');
 
-                  return (
-                    <tr
-                      key={email.id}
-                      onClick={() => onViewTimeline(email)}
-                      className="group hover:bg-white/[0.025] transition-colors cursor-pointer"
-                      title="Click row to inspect live Delivery Audit Trail"
+                    <div className="text-slate-700 font-medium truncate">
+                      {email.subject || '(No subject)'}
+                      <span className="font-normal text-slate-500 ml-2 text-[11px]">
+                        — {previewText}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Status & Quick Actions */}
+                  <div className="flex items-center space-x-3 flex-shrink-0 self-start sm:self-center">
+                    {renderStatusBadge(email)}
+
+                    <div
+                      className="inline-flex items-center space-x-1"
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      {/* Recipient & Domain Chip */}
-                      <td className="px-3.5 py-2.5">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs font-medium text-slate-200 group-hover:text-white transition-colors">
-                            {username}@<strong className="font-bold text-slate-100">{domain}</strong>
-                          </span>
-                          {domain && (
-                            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface-overlay text-slate-400 border border-white/[0.06] hidden md:inline-block">
-                              {domain}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] font-mono text-slate-400 mt-0.5">
-                          Job: <span className="text-slate-400">{email.jobId.slice(0, 18)}...</span>
-                        </div>
-                      </td>
+                      <button
+                        onClick={() => onViewTimeline(email)}
+                        title="View timeline audit"
+                        className="p-1.5 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 border border-transparent hover:border-slate-200 transition"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
 
-                      {/* Subject & Campaign Metadata */}
-                      <td className="px-3.5 py-2.5">
-                        <div className="text-slate-200 font-medium truncate max-w-xs text-xs">
-                          {email.subject}
-                        </div>
-                        <div className="text-[10px] font-mono text-slate-400 mt-0.5">
-                          Attempt: <span className="text-slate-400">{email.attempts} / 3</span>
-                        </div>
-                      </td>
-
-                      {/* Assigned Mailbox */}
-                      <td className="px-3.5 py-2.5">
-                        <div className="text-slate-300 font-mono text-[11px] truncate max-w-[180px]">
-                          {email.senderEmail || 'Default Ethereal'}
-                        </div>
-                        <div className="text-[10px] text-slate-400 font-mono">
-                          Sender ID: {email.senderId.slice(0, 8)}
-                        </div>
-                      </td>
-
-                      {/* Scheduled Time & Rollover */}
-                      <td className="px-3.5 py-2.5 font-mono text-[11px] tabular-nums">
-                        <div className="text-slate-200 font-medium">
-                          {format(new Date(email.scheduledAt), 'MMM dd, HH:mm:ss')}
-                        </div>
-                        <div className="text-[10px] text-slate-400">
-                          {new Date(email.scheduledAt) > new Date() ? 'Delayed Trigger' : 'Immediate Dispatch'}
-                        </div>
-                      </td>
-
-                      {/* Engine Subsystem State */}
-                      <td className="px-3.5 py-2.5">
-                        {renderStatusBadge(email)}
-                      </td>
-
-                      {/* Actions: Compact contextual group */}
-                      <td className="px-3.5 py-2.5 text-right whitespace-nowrap">
-                        <div
-                          className="inline-flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <button
-                            onClick={() => onViewTimeline(email)}
-                            title="Inspect Audit Timeline"
-                            className="p-1.5 rounded-md bg-surface-overlay hover:bg-surface-50 text-slate-300 hover:text-white border border-white/[0.06] transition"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => onCancelEmail(email.id)}
-                            title="Cancel Scheduled Dispatch"
-                            className="p-1.5 rounded-md bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 border border-rose-500/20 transition"
-                          >
-                            <XCircle className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                      <button
+                        onClick={() => onCancelEmail(email.id)}
+                        title="Cancel dispatch"
+                        className="p-1.5 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition"
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
 };
-

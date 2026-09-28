@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { apiClient } from '../../lib/api';
-import { ShieldCheck, Zap, Server, Mail, ArrowRight } from 'lucide-react';
+import { ShieldCheck, Zap, Server, Mail, ArrowRight, Send } from 'lucide-react';
 
 interface LoginPageProps {
   onLoginSuccess: () => void;
@@ -17,8 +17,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       const { url } = await apiClient.getGoogleAuthUrl();
       window.location.href = url;
     } catch (err: any) {
-      // If Google Client ID not yet set in .env, offer quick demo entrance
-      setError('Google OAuth Client ID is not configured yet in .env.');
+      setError('Google OAuth Client ID is not configured in .env. You can use Evaluator Quick Pass.');
       setLoading(false);
     }
   };
@@ -26,7 +25,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
   const handleDemoLogin = async () => {
     setLoading(true);
     try {
-      // In dev mode, /api/auth/me auto-provisions candidate demo user
       await apiClient.getMe();
       onLoginSuccess();
     } catch (e: any) {
@@ -37,21 +35,21 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md text-center space-y-3">
-        <div className="mx-auto w-12 h-12 rounded-2xl bg-gradient-to-tr from-brand-600 to-indigo-400 flex items-center justify-center shadow-xl shadow-brand-500/25">
-          <span className="font-extrabold text-white text-2xl tracking-wider">R</span>
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans">
+      <div className="sm:mx-auto sm:w-full sm:max-w-md text-center space-y-2">
+        <div className="mx-auto w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white shadow-md shadow-emerald-600/20">
+          <Send className="w-5 h-5" />
         </div>
-        <h2 className="text-3xl font-extrabold text-white tracking-tight">ReachFlow</h2>
-        <p className="text-sm text-slate-400">
-          Production-grade distributed email scheduler built for ReachInbox (Outbox Labs)
+        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">ReachFlow</h1>
+        <p className="text-xs text-slate-500 max-w-xs mx-auto">
+          Distributed Email Scheduling Engine & Intelligent Throttle Outreach Platform
         </p>
       </div>
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4">
-        <div className="bg-slate-900 border border-slate-800 py-8 px-6 shadow-2xl rounded-2xl sm:px-10 space-y-6">
+      <div className="mt-6 sm:mx-auto sm:w-full sm:max-w-md px-4">
+        <div className="bg-white border border-slate-200 py-8 px-6 shadow-sm rounded-xl sm:px-8 space-y-5">
           {error && (
-            <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs">
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
               {error}
             </div>
           )}
@@ -61,9 +59,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
             <button
               onClick={handleGoogleLogin}
               disabled={loading}
-              className="w-full flex items-center justify-center space-x-3 px-4 py-2.5 border border-slate-700 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-100 font-semibold text-sm transition shadow-sm hover:border-slate-600 active:scale-98"
+              className="w-full flex items-center justify-center space-x-3 px-4 py-2.5 border border-slate-200 rounded-lg bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs transition shadow-2xs active:scale-[0.99]"
             >
-              <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <svg className="w-4 h-4" viewBox="0 0 24 24">
                 <path
                   fill="#4285F4"
                   d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -87,10 +85,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
 
           <div className="relative">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-slate-800" />
+              <div className="w-full border-t border-slate-200" />
             </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-slate-900 px-2 text-slate-500 font-mono">Evaluator Quick Pass</span>
+            <div className="relative flex justify-center text-xs">
+              <span className="bg-white px-2 text-slate-400 font-mono text-[11px]">Instant Access</span>
             </div>
           </div>
 
@@ -99,30 +97,30 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
             <button
               onClick={handleDemoLogin}
               disabled={loading}
-              className="w-full flex items-center justify-center space-x-2 px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold text-sm transition shadow-lg shadow-brand-500/25 active:scale-98"
+              className="w-full flex items-center justify-center space-x-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition shadow-xs active:scale-[0.99]"
             >
-              <span>Launch Evaluator Dashboard</span>
+              <span>Open Outreach Workspace</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
 
-          {/* Architectural highlights */}
-          <div className="pt-4 border-t border-slate-800/80 space-y-2 text-[11px] text-slate-400">
+          {/* Highlights */}
+          <div className="pt-3 border-t border-slate-100 space-y-2 text-[11px] text-slate-500">
             <div className="flex items-center space-x-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-              <span>Strictly zero cron jobs (BullMQ Redis delayed sets)</span>
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+              <span>BullMQ delayed queues (zero cron jobs)</span>
             </div>
             <div className="flex items-center space-x-2">
-              <Zap className="w-4 h-4 text-brand-400 flex-shrink-0" />
-              <span>Atomic Redis Lua rate limiting & per-sender throttling</span>
+              <Zap className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+              <span>Atomic Redis Lua rate limiting & throttle pacing</span>
             </div>
             <div className="flex items-center space-x-2">
-              <Server className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+              <Server className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
               <span>Guaranteed job survival across server restarts</span>
             </div>
             <div className="flex items-center space-x-2">
-              <Mail className="w-4 h-4 text-purple-400 flex-shrink-0" />
-              <span>Multi-mailbox balancing with Ethereal live preview links</span>
+              <Mail className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+              <span>Multi-mailbox balancing with Ethereal live preview</span>
             </div>
           </div>
         </div>

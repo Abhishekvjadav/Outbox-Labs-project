@@ -8,6 +8,7 @@ import { EngineView } from './components/engine/EngineView';
 import { CampaignStudio } from './components/campaign/CampaignStudio';
 import { ScheduledTable } from './components/emails/ScheduledTable';
 import { SentTable } from './components/emails/SentTable';
+import { EmailDetailView } from './components/emails/EmailDetailView';
 import { SendersView } from './components/senders/SendersView';
 import { SlackSettingsCard } from './components/integrations/SlackSettingsCard';
 import { DeliveryTimelineModal } from './components/emails/DeliveryTimelineModal';
@@ -16,7 +17,7 @@ import { LoginPage } from './components/auth/LoginPage';
 export function App() {
   const [user, setUser] = useState<(UserDTO & { slackConnection?: any }) | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<NavigationTab>('overview');
+  const [activeTab, setActiveTab] = useState<NavigationTab>('scheduled');
 
   // Telemetry & Metrics
   const [health, setHealth] = useState<(SystemHealthDTO & { queueCounts?: any }) | null>(null);
@@ -30,6 +31,12 @@ export function App() {
   const [scheduledTotal, setScheduledTotal] = useState(0);
   const [sentTotal, setSentTotal] = useState(0);
   const [tableLoading, setTableLoading] = useState(false);
+
+  // Selected Email (Reading / Detail View)
+  const [selectedEmail, setSelectedEmail] = useState<EmailDTO | null>(null);
+
+  // Global Header Search
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Delivery Timeline Modal
   const [timelineEmail, setTimelineEmail] = useState<EmailDTO | null>(null);
@@ -53,6 +60,8 @@ export function App() {
       setActiveTab('scheduled');
     } else if (tabParam === 'sent') {
       setActiveTab('sent');
+    } else if (tabParam === 'overview') {
+      setActiveTab('overview');
     }
   }, []);
 
@@ -86,8 +95,9 @@ export function App() {
     if (!user) return;
     setTableLoading(true);
     try {
-      if (q && q.trim().length > 0) {
-        const res = await apiClient.searchEmails(q, 'SCHEDULED');
+      const query = q !== undefined ? q : searchQuery;
+      if (query && query.trim().length > 0) {
+        const res = await apiClient.searchEmails(query, 'SCHEDULED');
         setScheduledEmails(res.emails);
         setScheduledTotal(res.total);
       } else {
@@ -99,15 +109,16 @@ export function App() {
     } finally {
       setTableLoading(false);
     }
-  }, [user]);
+  }, [user, searchQuery]);
 
   // Fetch Sent Emails
   const fetchSent = useCallback(async (q?: string) => {
     if (!user) return;
     setTableLoading(true);
     try {
-      if (q && q.trim().length > 0) {
-        const res = await apiClient.searchEmails(q, 'SENT');
+      const query = q !== undefined ? q : searchQuery;
+      if (query && query.trim().length > 0) {
+        const res = await apiClient.searchEmails(query, 'SENT');
         setSentEmails(res.emails);
         setSentTotal(res.total);
       } else {
@@ -119,7 +130,7 @@ export function App() {
     } finally {
       setTableLoading(false);
     }
-  }, [user]);
+  }, [user, searchQuery]);
 
   // Telemetry & Metrics Poll
   const poll = useCallback(async () => {
@@ -185,6 +196,9 @@ export function App() {
       await apiClient.cancelScheduledEmail(emailId);
       poll();
       fetchScheduled();
+      if (selectedEmail?.id === emailId) {
+        setSelectedEmail(null);
+      }
     } catch (e: any) {
       alert(e.message);
     }
@@ -195,16 +209,31 @@ export function App() {
     setUser(null);
   };
 
+  const handleTabChange = (tab: NavigationTab) => {
+    setActiveTab(tab);
+    setSelectedEmail(null);
+    setSearchQuery('');
+  };
+
+  const handleSearch = (q: string) => {
+    setSearchQuery(q);
+    if (activeTab === 'scheduled') {
+      fetchScheduled(q);
+    } else if (activeTab === 'sent') {
+      fetchSent(q);
+    }
+  };
+
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-canvas flex items-center justify-center p-4">
-        <div className="bg-surface-card border border-white/[0.08] p-6 rounded-2xl shadow-elevated max-w-sm w-full space-y-4 text-center">
-          <div className="mx-auto w-10 h-10 rounded-xl bg-brand-600/20 border border-brand-500/30 flex items-center justify-center">
-            <div className="w-4 h-4 border-2 border-brand-400 border-t-transparent rounded-full animate-spin" />
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 font-sans">
+        <div className="bg-white border border-slate-200 p-6 rounded-xl shadow-card max-w-xs w-full space-y-3 text-center">
+          <div className="mx-auto w-9 h-9 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center">
+            <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
           </div>
           <div>
-            <h3 className="text-sm font-bold text-white tracking-tight">Initializing ReachFlow Engine</h3>
-            <p className="text-[11px] text-slate-400 font-mono mt-1">Verifying cluster session & telemetry...</p>
+            <h3 className="text-xs font-bold text-slate-900 tracking-tight">Starting ReachFlow</h3>
+            <p className="text-[11px] text-slate-500 font-mono mt-0.5">Connecting to message queue...</p>
           </div>
         </div>
       </div>
@@ -216,109 +245,133 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen bg-canvas text-slate-100 flex selection:bg-brand-500/30 selection:text-brand-200">
-      {/* 1. Persistent Left Sidebar */}
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex selection:bg-emerald-500 selection:text-white font-sans antialiased">
+      {/* 1. Persistent Left Sidebar (Narrow & Clean) */}
       <Sidebar
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         scheduledCount={metrics?.scheduled ?? scheduledTotal}
         sentCount={metrics?.sent ?? sentTotal}
         sendersCount={senders.length}
+        senders={senders}
         user={user}
         health={health}
         onLogout={handleLogout}
-        onOpenStudio={() => setActiveTab('studio')}
+        onOpenStudio={() => {
+          setActiveTab('studio');
+          setSelectedEmail(null);
+        }}
       />
 
       {/* 2. Main Workspace Canvas */}
-      <div className="flex-1 min-w-0 flex flex-col min-h-screen bg-canvas">
+      <div className="flex-1 min-w-0 flex flex-col min-h-screen bg-slate-50">
         {/* Top Header Bar */}
         <Header
           activeTab={activeTab}
           user={user}
           health={health}
-          onOpenStudio={() => setActiveTab('studio')}
+          onOpenStudio={() => {
+            setActiveTab('studio');
+            setSelectedEmail(null);
+          }}
           onRefresh={handleManualRefresh}
           refreshing={refreshing}
+          searchQuery={searchQuery}
+          onSearchChange={activeTab === 'scheduled' || activeTab === 'sent' ? handleSearch : undefined}
         />
 
-        {/* Scrollable Content View */}
-        <main className="flex-1 p-6 lg:p-8 max-w-7xl w-full mx-auto">
-          {/* View: Overview (Primary Homepage) */}
-          {activeTab === 'overview' && (
-            <OverviewView
-              user={user}
-              metrics={metrics}
-              scheduledTotal={scheduledTotal}
-              sentTotal={sentTotal}
-              scheduledEmails={scheduledEmails}
-              sentEmails={sentEmails}
-              senders={senders}
-              onOpenStudio={() => setActiveTab('studio')}
-              onViewTimeline={handleViewTimeline}
-              onNavigate={(tab) => setActiveTab(tab)}
-            />
-          )}
-
-          {/* View: Scheduled Pipeline */}
-          {activeTab === 'scheduled' && (
-            <ScheduledTable
-              emails={scheduledEmails}
-              loading={tableLoading}
-              onViewTimeline={handleViewTimeline}
+        {/* Workspace Content View */}
+        <main className="flex-1 p-5 lg:p-6 max-w-6xl w-full mx-auto">
+          {/* Detail Reading View (if email is selected) */}
+          {selectedEmail ? (
+            <EmailDetailView
+              email={selectedEmail}
+              onBack={() => setSelectedEmail(null)}
               onCancelEmail={handleCancelEmail}
-              onSearch={(q) => fetchScheduled(q)}
-              total={scheduledTotal}
-              onOpenCompose={() => setActiveTab('studio')}
-            />
-          )}
-
-          {/* View: Delivered (Sent) */}
-          {activeTab === 'sent' && (
-            <SentTable
-              emails={sentEmails}
-              loading={tableLoading}
               onViewTimeline={handleViewTimeline}
-              onSearch={(q) => fetchSent(q)}
-              total={sentTotal}
-              onOpenCompose={() => setActiveTab('studio')}
             />
-          )}
+          ) : (
+            <>
+              {/* View: Scheduled Pipeline */}
+              {activeTab === 'scheduled' && (
+                <ScheduledTable
+                  emails={scheduledEmails}
+                  loading={tableLoading}
+                  onViewTimeline={handleViewTimeline}
+                  onCancelEmail={handleCancelEmail}
+                  onSearch={(q) => fetchScheduled(q)}
+                  total={scheduledTotal}
+                  onOpenCompose={() => setActiveTab('studio')}
+                  onSelectEmail={(email) => setSelectedEmail(email)}
+                />
+              )}
 
-          {/* View: Campaign Studio (Two-Column Campaign Planner) */}
-          {activeTab === 'studio' && (
-            <CampaignStudio
-              senders={senders}
-              onCampaignCreated={() => {
-                poll();
-                fetchScheduled();
-                setActiveTab('scheduled');
-              }}
-              onCancel={() => setActiveTab('overview')}
-            />
-          )}
+              {/* View: Delivered (Sent) */}
+              {activeTab === 'sent' && (
+                <SentTable
+                  emails={sentEmails}
+                  loading={tableLoading}
+                  onViewTimeline={handleViewTimeline}
+                  onSearch={(q) => fetchSent(q)}
+                  total={sentTotal}
+                  onOpenCompose={() => setActiveTab('studio')}
+                  onSelectEmail={(email) => setSelectedEmail(email)}
+                />
+              )}
 
-          {/* View: Engine Telemetry (Operations -> Engine) */}
-          {activeTab === 'engine' && (
-            <EngineView
-              health={health}
-              metrics={metrics}
-              scheduledTotal={scheduledTotal}
-              sentTotal={sentTotal}
-              scheduledEmails={scheduledEmails}
-              sentEmails={sentEmails}
-              senders={senders}
-            />
-          )}
+              {/* View: Compose New Email (Campaign Studio) */}
+              {activeTab === 'studio' && (
+                <CampaignStudio
+                  senders={senders}
+                  onCampaignCreated={() => {
+                    poll();
+                    fetchScheduled();
+                    setActiveTab('scheduled');
+                  }}
+                  onCancel={() => setActiveTab('scheduled')}
+                />
+              )}
 
-          {/* View: Mailboxes (Operations -> Mailboxes) */}
-          {activeTab === 'senders' && (
-            <SendersView senders={senders} onSenderCreated={fetchSenders} />
-          )}
+              {/* View: Overview Summary */}
+              {activeTab === 'overview' && (
+                <OverviewView
+                  user={user}
+                  metrics={metrics}
+                  scheduledTotal={scheduledTotal}
+                  sentTotal={sentTotal}
+                  scheduledEmails={scheduledEmails}
+                  sentEmails={sentEmails}
+                  senders={senders}
+                  onOpenStudio={() => setActiveTab('studio')}
+                  onViewTimeline={handleViewTimeline}
+                  onNavigate={(tab) => handleTabChange(tab)}
+                  onSelectEmail={(email) => setSelectedEmail(email)}
+                />
+              )}
 
-          {/* View: Settings (Slack Integration & Channel Setup) */}
-          {activeTab === 'slack' && (
-            <SlackSettingsCard slackConnection={user.slackConnection} onRefresh={fetchUser} />
+              {/* View: Engine Telemetry (Operations -> Engine) */}
+              {activeTab === 'engine' && (
+                <EngineView
+                  health={health}
+                  metrics={metrics}
+                  scheduledTotal={scheduledTotal}
+                  sentTotal={sentTotal}
+                  scheduledEmails={scheduledEmails}
+                  sentEmails={sentEmails}
+                  senders={senders}
+                />
+              )}
+
+              {/* View: Mailboxes (Connected Senders) */}
+              {activeTab === 'senders' && (
+                <SendersView senders={senders} onSenderCreated={fetchSenders} />
+              )}
+
+              {/* View: Settings (Slack Integration) */}
+              {activeTab === 'slack' && (
+                <SlackSettingsCard slackConnection={user.slackConnection} onRefresh={fetchUser} />
+              )}
+            </>
           )}
         </main>
       </div>

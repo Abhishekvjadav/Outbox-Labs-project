@@ -1,7 +1,13 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { SenderDTO, parseAndValidateLeads, calculateCampaignEstimate, CsvValidationResult } from '@reachflow/shared';
 import { apiClient } from '../../lib/api';
-import { X, UploadCloud, Clock, AlertCircle, CheckCircle, Flame, Sparkles } from 'lucide-react';
+import { 
+  X, 
+  UploadCloud, 
+  AlertCircle, 
+  Sparkles
+} from 'lucide-react';
+import { format } from 'date-fns';
 
 interface ComposeModalProps {
   isOpen: boolean;
@@ -16,10 +22,10 @@ export const ComposeModal: React.FC<ComposeModalProps> = ({
   senders,
   onCampaignCreated,
 }) => {
-  const [name, setName] = useState('Outreach Campaign');
+  const [name] = useState('Outreach Campaign');
   const [subject, setSubject] = useState('Exclusive opportunity for your engineering team');
   const [body, setBody] = useState(
-    'Hi there,\n\nWe noticed your team is building high-scale distributed systems. ReachFlow automates intelligent mailbox throttling and rate-limit recovery.\n\nBest,\nReachFlow Team'
+    'Hi there,\n\nWe noticed your team is building high-scale distributed systems. ReachFlow automates intelligent mailbox throttling and rate-limit recovery.\n\nBest regards,\nReachFlow Team'
   );
   const [selectedSenderIds, setSelectedSenderIds] = useState<string[]>(
     senders.length > 0 ? [senders[0].id] : []
@@ -31,21 +37,45 @@ export const ComposeModal: React.FC<ComposeModalProps> = ({
     }
   }, [senders, selectedSenderIds]);
 
-  // CSV Lead pre-flight state
+  const [recipientInput, setRecipientInput] = useState('');
+  const [recipientChips, setRecipientChips] = useState<string[]>([
+    'sarah.connor@cyberdyne.net',
+    'alex.miller@apexflow.com',
+  ]);
   const [csvResult, setCsvResult] = useState<CsvValidationResult | null>(null);
-  const [rawText, setRawText] = useState('');
 
-  // Schedule params
-  const [startTime, setStartTime] = useState(() => {
-    const d = new Date(Date.now() + 30000); // Default now + 30s
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  });
-  const [delayMs, setDelayMs] = useState(2000);
-  const [hourlyLimit, setHourlyLimit] = useState(50);
+  useEffect(() => {
+    const parsed = parseAndValidateLeads(recipientChips);
+    setCsvResult(parsed);
+  }, [recipientChips]);
+
+  const [scheduleDate] = useState<Date>(() => new Date(Date.now() + 30000));
+  const [delaySeconds, setDelaySeconds] = useState(2);
+  const [hourlyLimit, setHourlyLimit] = useState(100);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Pre-load demo leads button for instant 5-minute evaluator demo
+  const handleKeyDownRecipient = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' || e.key === ',' || e.key === ' ') {
+      e.preventDefault();
+      addRecipientFromInput();
+    } else if (e.key === 'Backspace' && recipientInput === '' && recipientChips.length > 0) {
+      setRecipientChips(recipientChips.slice(0, -1));
+    }
+  };
+
+  const addRecipientFromInput = () => {
+    const val = recipientInput.trim().replace(/,$/, '');
+    if (val && !recipientChips.includes(val)) {
+      setRecipientChips([...recipientChips, val]);
+      setRecipientInput('');
+    }
+  };
+
+  const removeRecipientChip = (chipToRemove: string) => {
+    setRecipientChips(recipientChips.filter((c) => c !== chipToRemove));
+  };
+
   const handleLoadDemoLeads = () => {
     const demoLeads = [
       'john.doe@techscale.io',
@@ -56,12 +86,8 @@ export const ComposeModal: React.FC<ComposeModalProps> = ({
       'dwight.schrute@dunder.com',
       'pam.beesly@dunder.com',
       'jim.halpert@dunder.com',
-      'john.doe@techscale.io', // Intentional duplicate
-      'invalid-email-format',    // Intentional invalid
     ];
-    const parsed = parseAndValidateLeads(demoLeads);
-    setCsvResult(parsed);
-    setRawText(demoLeads.join('\n'));
+    setRecipientChips(demoLeads);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -71,46 +97,31 @@ export const ComposeModal: React.FC<ComposeModalProps> = ({
     const reader = new FileReader();
     reader.onload = (event) => {
       const content = event.target?.result as string;
-      setRawText(content);
-      const lines = content.split(/[\r\n,;]+/);
-      const parsed = parseAndValidateLeads(lines);
-      setCsvResult(parsed);
+      const lines = content.split(/[\r\n,;]+/).map((s) => s.trim()).filter(Boolean);
+      setRecipientChips(Array.from(new Set([...recipientChips, ...lines])));
     };
     reader.readAsText(file);
+    if (e.target) e.target.value = '';
   };
 
-  const handleTextChange = (text: string) => {
-    setRawText(text);
-    const lines = text.split(/[\r\n,;]+/);
-    const parsed = parseAndValidateLeads(lines);
-    setCsvResult(parsed);
-  };
-
-  // Toggle sender selection
-  const toggleSender = (senderId: string) => {
-    if (selectedSenderIds.includes(senderId)) {
-      if (selectedSenderIds.length > 1) {
-        setSelectedSenderIds(selectedSenderIds.filter((id) => id !== senderId));
-      }
-    } else {
-      setSelectedSenderIds([...selectedSenderIds, senderId]);
-    }
-  };
-
-  // Dynamic campaign completion estimator
   const estimate = useMemo(() => {
     const validCount = csvResult?.valid || 0;
-    return calculateCampaignEstimate(validCount, selectedSenderIds.length, hourlyLimit, delayMs);
-  }, [csvResult?.valid, selectedSenderIds.length, hourlyLimit, delayMs]);
+    return calculateCampaignEstimate(
+      validCount,
+      Math.max(1, selectedSenderIds.length),
+      hourlyLimit,
+      delaySeconds * 1000
+    );
+  }, [csvResult?.valid, selectedSenderIds.length, hourlyLimit, delaySeconds]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!csvResult || csvResult.valid === 0) {
-      setError('Please upload or enter at least one valid lead email address.');
+      setError('Please add at least one valid recipient.');
       return;
     }
     if (selectedSenderIds.length === 0) {
-      setError('Please select at least one sender mailbox.');
+      setError('Please select a sender mailbox.');
       return;
     }
 
@@ -125,8 +136,8 @@ export const ComposeModal: React.FC<ComposeModalProps> = ({
         body,
         senderIds: selectedSenderIds,
         leads: validLeads,
-        startTime: new Date(startTime),
-        delayMs,
+        startTime: scheduleDate,
+        delayMs: delaySeconds * 1000,
         hourlyLimit,
       });
 
@@ -141,256 +152,190 @@ export const ComposeModal: React.FC<ComposeModalProps> = ({
 
   if (!isOpen) return null;
 
+  const isScheduleInFuture = scheduleDate.getTime() > Date.now() + 60000;
+
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 font-sans">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-2xl shadow-popover overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/40">
-          <div>
-            <h3 className="text-lg font-bold text-white flex items-center space-x-2">
-              <span>Compose Outreach Campaign</span>
-              <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-brand-500/20 text-brand-400">
-                Persistent BullMQ
-              </span>
-            </h3>
-            <p className="text-xs text-slate-400">Schedule delayed batches with per-sender rate limiting & recovery</p>
+        <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50/50">
+          <div className="flex items-center space-x-2">
+            <h3 className="text-sm font-bold text-slate-900">Compose New Email</h3>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+              BullMQ Queue
+            </span>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+            className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+        <form onSubmit={handleSubmit} className="p-5 space-y-4 max-h-[80vh] overflow-y-auto text-xs">
           {error && (
-            <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center space-x-2">
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center space-x-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
               <span>{error}</span>
             </div>
           )}
 
-          {/* Campaign Name & Senders */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Campaign Name</label>
-              <input
-                type="text"
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-brand-500"
-                placeholder="e.g. Q4 Growth Sequence"
-              />
+          {/* From & To */}
+          <div className="space-y-2.5 divide-y divide-slate-100">
+            <div className="flex items-center">
+              <label className="w-16 text-slate-400 font-medium">From</label>
+              <select
+                value={selectedSenderIds[0] || ''}
+                onChange={(e) => setSelectedSenderIds([e.target.value])}
+                className="flex-1 px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-900 font-medium focus:outline-none focus:border-emerald-500"
+              >
+                {senders.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} &lt;{s.email}&gt; ({s.hourlyLimit}/hr)
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Select Senders ({selectedSenderIds.length} active)
-              </label>
-              <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-1.5 bg-slate-950 border border-slate-800 rounded-lg">
-                {senders.map((sender) => {
-                  const isSelected = selectedSenderIds.includes(sender.id);
-                  return (
+            <div className="pt-2 flex flex-col sm:flex-row sm:items-start gap-2">
+              <label className="w-16 text-slate-400 font-medium pt-1.5">To</label>
+              <div className="flex-1">
+                <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-slate-50 border border-slate-200 rounded-lg focus-within:border-emerald-500 focus-within:bg-white min-h-[36px]">
+                  {recipientChips.map((chip, idx) => (
+                    <span
+                      key={idx}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-white text-slate-800 border border-slate-200 shadow-2xs font-mono"
+                    >
+                      <span>{chip}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeRecipientChip(chip)}
+                        className="text-slate-400 hover:text-slate-700"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    type="email"
+                    value={recipientInput}
+                    onChange={(e) => setRecipientInput(e.target.value)}
+                    onKeyDown={handleKeyDownRecipient}
+                    onBlur={addRecipientFromInput}
+                    placeholder={recipientChips.length === 0 ? 'recipient@example.com' : 'Add recipient...'}
+                    className="flex-1 min-w-[140px] bg-transparent text-xs text-slate-900 focus:outline-none px-1"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between gap-2 mt-1.5">
+                  <div className="flex items-center space-x-2">
+                    <label className="cursor-pointer inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-medium border border-slate-200 transition">
+                      <UploadCloud className="w-3 h-3 text-emerald-600" />
+                      <span>Upload List</span>
+                      <input type="file" accept=".csv,.txt" onChange={handleFileUpload} className="hidden" />
+                    </label>
                     <button
                       type="button"
-                      key={sender.id}
-                      onClick={() => toggleSender(sender.id)}
-                      className={`text-[11px] px-2.5 py-1 rounded-md transition flex items-center space-x-1.5 ${
-                        isSelected
-                          ? 'bg-brand-600 text-white font-semibold'
-                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-                      }`}
+                      onClick={handleLoadDemoLeads}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 text-[11px] font-medium border border-emerald-200 hover:bg-emerald-100"
                     >
-                      <span>{sender.name.split(' ')[0]}</span>
-                      <span className="text-[10px] opacity-75 font-mono">({sender.hourlyLimit}/hr)</span>
+                      <Sparkles className="w-3 h-3 text-emerald-600" />
+                      <span>Demo Leads</span>
                     </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          {/* Subject & Body */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">Subject</label>
-            <input
-              type="text"
-              required
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-brand-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">Email Body</label>
-            <textarea
-              rows={4}
-              required
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-brand-500"
-            />
-          </div>
-
-          {/* CSV Lead Pre-flight Validator */}
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="text-xs font-semibold text-slate-300 flex items-center space-x-1">
-                <span>Leads (Upload CSV / Paste Emails)</span>
-              </label>
-              <button
-                type="button"
-                onClick={handleLoadDemoLeads}
-                className="text-[11px] font-semibold text-brand-400 hover:text-brand-300 flex items-center space-x-1 transition"
-              >
-                <Sparkles className="w-3 h-3" />
-                <span>Load 10 Demo Leads</span>
-              </button>
-            </div>
-
-            <div className="border-2 border-dashed border-slate-800 rounded-xl p-4 bg-slate-950/60 hover:border-slate-700 transition">
-              <div className="flex items-center justify-between mb-3">
-                <label className="cursor-pointer inline-flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 transition">
-                  <UploadCloud className="w-4 h-4 text-brand-400" />
-                  <span>Choose CSV / TXT File</span>
-                  <input type="file" accept=".csv,.txt" onChange={handleFileUpload} className="hidden" />
-                </label>
-                <span className="text-[11px] text-slate-500">or paste directly below</span>
-              </div>
-
-              <textarea
-                rows={3}
-                value={rawText}
-                onChange={(e) => handleTextChange(e.target.value)}
-                placeholder="alice@company.com&#10;bob@corp.org&#10;charlie@startup.ai"
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-brand-500"
-              />
-
-              {/* Pre-flight badges */}
-              {csvResult && (
-                <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
-                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center space-x-1">
-                    <CheckCircle className="w-3.5 h-3.5" />
-                    <span>{csvResult.valid} valid leads</span>
-                  </span>
-                  {csvResult.duplicates > 0 && (
-                    <span className="px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center space-x-1">
-                      <AlertCircle className="w-3.5 h-3.5" />
-                      <span>{csvResult.duplicates} duplicate(s) removed</span>
-                    </span>
-                  )}
-                  {csvResult.invalid > 0 && (
-                    <span className="px-2.5 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/30 flex items-center space-x-1">
-                      <AlertCircle className="w-3.5 h-3.5" />
-                      <span>{csvResult.invalid} invalid format</span>
+                  </div>
+                  {csvResult && (
+                    <span className="text-emerald-700 font-semibold text-[11px]">
+                      {csvResult.valid} valid leads
                     </span>
                   )}
                 </div>
-              )}
+              </div>
+            </div>
+
+            <div className="pt-2 flex items-center">
+              <label className="w-16 text-slate-400 font-medium">Subject</label>
+              <input
+                type="text"
+                required
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                placeholder="Subject..."
+                className="flex-1 px-2 py-1 bg-transparent text-xs text-slate-900 font-semibold focus:outline-none placeholder-slate-400"
+              />
             </div>
           </div>
 
-          {/* Schedule Configuration */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Start Time</label>
-              <input
-                type="datetime-local"
-                required
-                value={startTime}
-                onChange={(e) => setStartTime(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-brand-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Inter-Send Delay (ms)</label>
-              <input
-                type="number"
-                min="500"
-                step="500"
-                required
-                value={delayMs}
-                onChange={(e) => setDelayMs(parseInt(e.target.value, 10))}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-brand-500"
-              />
-              <span className="text-[10px] text-slate-500">Min 2000ms recommended</span>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Hourly Limit / Sender</label>
-              <input
-                type="number"
-                min="1"
-                required
-                value={hourlyLimit}
-                onChange={(e) => setHourlyLimit(parseInt(e.target.value, 10))}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-brand-500"
-              />
-              <span className="text-[10px] text-slate-500">Enforced via Redis Lua</span>
-            </div>
+          {/* Email Body */}
+          <div>
+            <textarea
+              rows={5}
+              required
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              placeholder="Type your message..."
+              className="w-full p-3 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-emerald-500 font-sans leading-relaxed"
+            />
           </div>
 
-          {/* Dynamic Campaign Estimator Box */}
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-brand-500/20 text-xs">
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center space-x-1.5 text-brand-400 font-semibold">
-                <Flame className="w-4 h-4" />
-                <span>Estimated Completion Time</span>
+          {/* Campaign Controls */}
+          <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-1.5">
+                <span className="text-slate-500 font-medium">Delay:</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="60"
+                  value={delaySeconds}
+                  onChange={(e) => setDelaySeconds(Math.max(1, parseInt(e.target.value) || 2))}
+                  className="w-12 px-1.5 py-0.5 bg-white border border-slate-200 rounded text-center font-mono font-semibold"
+                />
+                <span className="text-slate-400">s</span>
               </div>
-              <span className="font-bold text-white font-mono">{estimate.estimatedDurationHuman}</span>
+
+              <div className="flex items-center space-x-1.5">
+                <span className="text-slate-500 font-medium">Hourly:</span>
+                <input
+                  type="number"
+                  min="5"
+                  max="200"
+                  value={hourlyLimit}
+                  onChange={(e) => setHourlyLimit(Math.max(1, parseInt(e.target.value) || 100))}
+                  className="w-14 px-1.5 py-0.5 bg-white border border-slate-200 rounded text-center font-mono font-semibold"
+                />
+                <span className="text-slate-400">/hr</span>
+              </div>
             </div>
-            <div className="text-[11px] text-slate-400 space-y-1">
-              <div className="flex justify-between">
-                <span>Active Senders:</span>
-                <span className="text-slate-200 font-mono">{selectedSenderIds.length} mailboxes</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Combined Capacity:</span>
-                <span className="text-slate-200 font-mono">{estimate.combinedCapacityPerHour} emails/hr</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Governing Bottleneck:</span>
-                <span className="text-slate-200 font-mono">
-                  {estimate.bottleneck === 'RATE_LIMIT' ? 'Hourly Rate Limit' : 'Inter-Send Delay Throttling'}
-                </span>
-              </div>
-              <p className="text-[10px] text-slate-500 pt-1 italic">
-                *Estimated completion assuming balanced sender distribution.
-              </p>
+
+            <div className="text-[11px] text-slate-500 font-mono">
+              Est: <strong className="text-slate-800">{estimate.estimatedDurationHuman}</strong>
             </div>
           </div>
 
           {/* Footer Submit */}
-          <div className="flex items-center justify-end space-x-3 pt-3 border-t border-slate-800">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-300 hover:bg-slate-800 transition"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={loading || !csvResult || csvResult.valid === 0}
-              className="px-5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold shadow-lg shadow-brand-500/20 transition flex items-center space-x-2"
-            >
-              {loading ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span>Enqueuing Delayed Jobs...</span>
-                </>
-              ) : (
-                <>
-                  <Clock className="w-4 h-4" />
-                  <span>Schedule Campaign</span>
-                </>
-              )}
-            </button>
+          <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+            <span className="text-[11px] text-slate-400 font-mono">
+              {isScheduleInFuture ? `Scheduled for: ${format(scheduleDate, 'MMM dd, h:mm a')}` : 'Ready for immediate dispatch'}
+            </span>
+
+            <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={loading || !csvResult || csvResult.valid === 0}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition shadow-2xs"
+              >
+                {loading ? 'Scheduling...' : isScheduleInFuture ? 'Schedule Email' : 'Send'}
+              </button>
+            </div>
           </div>
         </form>
       </div>
